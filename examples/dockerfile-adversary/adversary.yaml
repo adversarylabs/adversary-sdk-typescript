@@ -1,3 +1,31 @@
 name: dockerfile-adversary
+version: 0.1.0
 description: Finds suspicious Dockerfile ENV and ARG variables.
-entrypoint: npm start
+
+triggers:
+  manual: true
+  files_changed:
+    - Dockerfile
+    - "**/Dockerfile"
+    - Dockerfile.*
+    - "**/Dockerfile.*"
+    - "*.dockerfile"
+    - "**/*.dockerfile"
+
+runtime:
+  name: node
+  version: "22"
+  command:
+    - dist/index.js
+
+permissions:
+  filesystem:
+    read:
+      - .
+    write:
+      - .adversary/results
+  network: false
+  env: []
+
+findings:
+  format: adversary.findings.v1

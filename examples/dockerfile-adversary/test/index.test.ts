@@ -10,20 +10,26 @@ describe("dockerfile adversary", () => {
     await mkdir(join(workspace, "services", "api"), { recursive: true });
     await writeFile(
       join(workspace, "services", "api", "Dockerfile"),
-      ["FROM node:22-slim", "ARG API_KEY", "ENV NODE_ENV=production"].join("\n")
+      ["FROM node:22-slim", "ARG API_KEY", "ENV NODE_ENV=production"].join("\n"),
     );
 
     const output = await adversary.run({
-      schemaVersion: "adversary.input.v1",
-      workspace
+      input: {
+        source: {
+          path: workspace,
+        },
+      },
+      write: false,
     });
 
     expect(output.findings).toHaveLength(1);
     expect(output.findings[0]).toMatchObject({
-      id: "DOCKER-001",
+      ruleId: "docker.suspicious.env",
       severity: "high",
+    });
+    expect(output.findings[0]?.evidence[0]).toMatchObject({
       file: "services/api/Dockerfile",
-      line: 2
+      line: 2,
     });
   });
 });

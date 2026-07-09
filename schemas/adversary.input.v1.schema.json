@@ -3,54 +3,17 @@
   "$id": "https://schemas.adversarylabs.com/adversary.input.v1.schema.json",
   "title": "Adversary Input",
   "type": "object",
-  "additionalProperties": false,
-  "required": ["schemaVersion", "workspace"],
+  "additionalProperties": true,
+  "required": ["source"],
   "properties": {
-    "schemaVersion": {
-      "const": "adversary.input.v1"
-    },
-    "workspace": {
-      "type": "string",
-      "minLength": 1
-    },
-    "change": {
-      "$ref": "#/$defs/changeContext"
-    },
-    "config": {
+    "source": {
       "type": "object",
-      "additionalProperties": true
-    }
-  },
-  "$defs": {
-    "changeContext": {
-      "type": "object",
-      "additionalProperties": false,
+      "additionalProperties": true,
+      "required": ["path"],
       "properties": {
-        "baseRef": {
-          "type": "string"
-        },
-        "headRef": {
-          "type": "string"
-        },
-        "files": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["path"],
-            "properties": {
-              "path": {
-                "type": "string",
-                "minLength": 1
-              },
-              "status": {
-                "enum": ["added", "modified", "deleted", "renamed", "copied", "unknown"]
-              },
-              "oldPath": {
-                "type": "string"
-              }
-            }
-          }
+        "path": {
+          "type": "string",
+          "minLength": 1
         }
       }
     }

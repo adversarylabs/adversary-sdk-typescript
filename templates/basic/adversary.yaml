@@ -1,3 +1,27 @@
 name: basic-adversary
-description: Minimal TypeScript Adversary
-entrypoint: npm start
+version: 0.1.0
+description: Minimal TypeScript Adversary.
+
+triggers:
+  manual: true
+  files_changed:
+    - "*"
+    - "**/*"
+
+runtime:
+  name: node
+  version: "22"
+  command:
+    - dist/index.js
+
+permissions:
+  filesystem:
+    read:
+      - .
+    write:
+      - .adversary/results
+  network: false
+  env: []
+
+findings:
+  format: adversary.findings.v1

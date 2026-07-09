@@ -9,7 +9,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@adversarylabs/sdk": "^0.1.0"
+    "@adversary/sdk": "^0.1.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

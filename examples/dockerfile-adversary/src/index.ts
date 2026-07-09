@@ -1,21 +1,24 @@
-import { readdir, readFile } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { defineAdversary, finding, writeOutput } from "@adversarylabs/sdk";
+import { Adversary, Finding, Severity } from "@adversary/sdk";
 
 const suspiciousNames = ["SECRET", "PASSWORD", "TOKEN", "API_KEY"];
-const ignoredDirectories = new Set([".git", "node_modules", "dist", "coverage"]);
 
-const adversary = defineAdversary(async ({ workspace, report }) => {
-  for await (const file of walk(workspace)) {
-    if (!isDockerfile(file)) {
-      continue;
-    }
+const adversary = new Adversary({
+  name: "adversarylabs/dockerfile",
+  schemaVersion: "adversary.findings.v1",
+});
 
-    const content = await readFile(file, "utf8");
+adversary.rule("docker.suspicious.env", async (ctx) => {
+  const dockerfiles = await ctx.rglob("Dockerfile*");
+  const findings: Finding[] = [];
+
+  ctx.summary.files_scanned = dockerfiles.length;
+
+  for (const dockerfile of dockerfiles) {
+    const content = await readFile(join(ctx.repoPath, dockerfile), "utf8");
     const lines = content.split(/\r?\n/);
-    const relativeFile = relative(workspace, file) || "Dockerfile";
-
     lines.forEach((line, index) => {
       const match = line.match(/^\s*(ENV|ARG)\s+([A-Za-z_][A-Za-z0-9_]*)\b/);
       if (!match) {
@@ -30,52 +33,31 @@ const adversary = defineAdversary(async ({ workspace, report }) => {
         return;
       }
 
-      report(
-        finding({
-          id: "DOCKER-001",
-          severity: "high",
+      findings.push(
+        new Finding({
+          ruleId: "docker.suspicious.env",
+          severity: Severity.High,
           title: `Suspicious Dockerfile ${match[1]} variable`,
-          file: relativeFile,
+          message: "Dockerfile may bake a secret-like variable into an image.",
+          path: dockerfile,
           line: index + 1,
           evidence: line.trim(),
           recommendation:
             "Avoid baking secrets into images. Use runtime secrets or build-time secret mounts instead.",
           metadata: {
             variable: variableName,
-            matchedName
-          }
-        })
+            matchedName,
+          },
+        }),
       );
     });
   }
+
+  return findings;
 });
 
 export default adversary;
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  await writeOutput(await adversary.run());
-}
-
-async function* walk(directory: string): AsyncGenerator<string> {
-  const entries = await readdir(directory, { withFileTypes: true });
-
-  for (const entry of entries) {
-    const path = join(directory, entry.name);
-
-    if (entry.isDirectory()) {
-      if (!ignoredDirectories.has(entry.name)) {
-        yield* walk(path);
-      }
-      continue;
-    }
-
-    if (entry.isFile()) {
-      yield path;
-    }
-  }
-}
-
-function isDockerfile(path: string): boolean {
-  const fileName = path.split(/[\\/]/).at(-1);
-  return fileName === "Dockerfile" || fileName?.startsWith("Dockerfile.") === true;
+  await adversary.run();
 }

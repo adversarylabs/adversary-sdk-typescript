@@ -1,6 +1,6 @@
 # basic-adversary
 
-Minimal TypeScript Adversary built with `@adversarylabs/sdk`.
+Minimal TypeScript Adversary built with `@adversary/sdk`.
 
 ```bash
 npm install

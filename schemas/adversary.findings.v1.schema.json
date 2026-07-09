@@ -4,10 +4,20 @@
   "title": "Adversary Findings",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "findings"],
+  "required": ["schema_version", "adversary", "summary", "findings"],
   "properties": {
-    "schemaVersion": {
+    "schema_version": {
       "const": "adversary.findings.v1"
+    },
+    "adversary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": {
+        "type": ["number", "string", "boolean", "null"]
+      }
     },
     "findings": {
       "type": "array",
@@ -20,8 +30,12 @@
     "finding": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "severity", "title"],
+      "required": ["rule_id", "id", "severity", "title"],
       "properties": {
+        "rule_id": {
+          "type": "string",
+          "minLength": 1
+        },
         "id": {
           "type": "string",
           "minLength": 1
@@ -32,6 +46,12 @@
         "title": {
           "type": "string",
           "minLength": 1
+        },
+        "message": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
         },
         "file": {
           "type": "string"
