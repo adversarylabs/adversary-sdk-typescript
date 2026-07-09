@@ -409,6 +409,16 @@ npm run build
 npm run lint
 ```
 
+## CI and Release
+
+Depot CI workflows live in `.depot/workflows/`.
+
+- Pull requests run lint, tests, and build.
+- Tags matching `v*` run lint, tests, build, verify the tag matches `package.json`, and publish to npm.
+
+Publishing requires an `NPM_TOKEN` secret in Depot CI. Release tags should match the package
+version, for example `v0.1.0`.
+
 With direnv:
 
 ```bash

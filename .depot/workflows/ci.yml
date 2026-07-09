@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    if: github.event_name == 'pull_request'
+    runs-on: depot-ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+  publish:
+    name: Publish to npm
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: depot-ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify package version matches tag
+        run: |
+          node --input-type=module <<'EOF'
+          import { readFileSync } from "node:fs";
+
+          const tag = process.env.GITHUB_REF_NAME?.replace(/^v/, "");
+          const pkg = JSON.parse(readFileSync("package.json", "utf8"));
+
+          if (pkg.version !== tag) {
+            console.error(`package.json version ${pkg.version} does not match tag ${process.env.GITHUB_REF_NAME}`);
+            process.exit(1);
+          }
+          EOF
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Publish
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
