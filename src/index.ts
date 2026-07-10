@@ -295,7 +295,7 @@ export interface RuleDefinition {
   defaultSeverity?: Severity;
   defaultConfidence?: ConfidenceInput;
   groupBy?: string[];
-  aggregate?: (observations: ObservationInit[]) => Partial<ReviewFinding>;
+  aggregate?: (observations: ReadonlyArray<ObservationInit>) => Partial<ReviewFinding>;
 }
 
 export class RuleRegistry {
@@ -303,22 +303,74 @@ export class RuleRegistry {
 
   register(rule: RuleDefinition): void {
     assertRuleDefinition(rule);
-    this.rules.set(rule.id, rule);
+    if (this.rules.has(rule.id)) {
+      throw new Error(`Rule definition "${rule.id}" is already registered.`);
+    }
+    this.rules.set(rule.id, cloneRuleDefinition(rule));
+  }
+
+  replace(rule: RuleDefinition): void {
+    assertRuleDefinition(rule);
+    if (!this.rules.has(rule.id)) {
+      throw new Error(`Rule definition "${rule.id}" is not registered.`);
+    }
+    this.rules.set(rule.id, cloneRuleDefinition(rule));
   }
 
   lookup(ruleId: string): RuleDefinition | undefined {
-    return this.rules.get(ruleId);
+    const rule = this.rules.get(ruleId);
+    return rule === undefined ? undefined : cloneRuleDefinition(rule);
   }
 
   has(ruleId: string): boolean {
     return this.rules.has(ruleId);
   }
+
+  snapshot(): RuleRegistry {
+    const snapshot = new RuleRegistry();
+    for (const rule of this.rules.values()) {
+      snapshot.register(rule);
+    }
+    return snapshot;
+  }
+
+  importMissing(source: RuleRegistry): void {
+    for (const rule of source.rules.values()) {
+      if (!this.rules.has(rule.id)) {
+        this.rules.set(rule.id, cloneRuleDefinition(rule));
+      }
+    }
+  }
 }
 
+function cloneRuleDefinition(rule: RuleDefinition): RuleDefinition {
+  return {
+    ...rule,
+    groupBy: rule.groupBy === undefined ? undefined : [...rule.groupBy],
+  };
+}
+
+function cloneReviewPolicy(policy: ReviewPolicy): ReviewPolicy {
+  return {
+    ...policy,
+    confidenceThresholds:
+      policy.confidenceThresholds === undefined ? undefined : { ...policy.confidenceThresholds },
+    severityOverrides:
+      policy.severityOverrides === undefined ? undefined : { ...policy.severityOverrides },
+  };
+}
+
+/** @deprecated Prefer app.defineRule(...) so definitions remain instance-scoped. */
 export const ruleRegistry = new RuleRegistry();
 
+/** @deprecated Prefer app.defineRule(...) so definitions remain instance-scoped. */
 export function defineRule(rule: RuleDefinition): void {
   ruleRegistry.register(rule);
+}
+
+/** @deprecated Prefer app.replaceRule(...) so definitions remain instance-scoped. */
+export function replaceRule(rule: RuleDefinition): void {
+  ruleRegistry.replace(rule);
 }
 
 export const log = {
@@ -346,8 +398,9 @@ export const log = {
 export class Adversary {
   readonly name: string;
   readonly version?: string;
-  readonly rules: Array<{ id: string; handler: RuleHandler }> = [];
-  readonly reviewPolicy: ReviewPolicy;
+  private readonly rules: Array<{ id: string; handler: RuleHandler }> = [];
+  private readonly reviewPolicy: ReviewPolicy;
+  private readonly ruleDefinitions: RuleRegistry;
 
   constructor(options: AdversaryOptions) {
     if (options.name.length === 0) {
@@ -356,7 +409,20 @@ export class Adversary {
 
     this.name = options.name;
     this.version = options.version;
-    this.reviewPolicy = options.review ?? {};
+    this.reviewPolicy = cloneReviewPolicy(options.review ?? {});
+    this.ruleDefinitions = ruleRegistry.snapshot();
+  }
+
+  defineRule(rule: RuleDefinition): void {
+    this.ruleDefinitions.register(rule);
+  }
+
+  replaceRule(rule: RuleDefinition): void {
+    this.ruleDefinitions.replace(rule);
+  }
+
+  hasRuleDefinition(ruleId: string): boolean {
+    return this.ruleDefinitions.has(ruleId);
   }
 
   rule(id: string, handler: RuleHandler): void {
@@ -364,6 +430,13 @@ export class Adversary {
       throw new Error("Rule id must be a non-empty string.");
     }
 
+    if (this.rules.some((rule) => rule.id === id)) {
+      throw new Error(`App rule "${id}" is already registered.`);
+    }
+
+    // Compatibility for definitions registered with the deprecated top-level API after
+    // this Adversary was constructed. Once copied, later global changes cannot affect it.
+    this.ruleDefinitions.importMissing(ruleRegistry);
     this.rules.push({ id, handler });
   }
 
@@ -374,7 +447,8 @@ export class Adversary {
     const summary: Summary = {};
     const cache = new Map<string, unknown>();
     const collector = createReviewCollector();
-    const context = createRuleContext(repoPath, summary, cache, collector);
+    const registry = this.ruleDefinitions.snapshot();
+    const context = createRuleContext(repoPath, summary, cache, collector, registry);
     const includeSuppressed =
       options.includeSuppressed ?? parseBooleanEnv(process.env.ADVERSARY_INCLUDE_SUPPRESSED);
 
@@ -388,7 +462,8 @@ export class Adversary {
       repository: repoPath,
       filesScanned: typeof summary.files_scanned === "number" ? summary.files_scanned : undefined,
       collector,
-      policy: { ...this.reviewPolicy, ...options.review },
+      policy: cloneReviewPolicy({ ...this.reviewPolicy, ...options.review }),
+      registry,
       includeSuppressed,
       includeRawObservations: options.includeRawObservations,
       timing: { totalMs: Math.round(performance.now() - startedAt) },
@@ -599,6 +674,7 @@ function createRuleContext(
   summary: Summary,
   cache: Map<string, unknown>,
   collector: ReviewCollector,
+  registry: RuleRegistry,
 ): RuleContext {
   const absoluteRepoPath = resolve(repoPath);
 
@@ -616,7 +692,7 @@ function createRuleContext(
       return findMatchingPaths(absoluteRepoPath, pattern, true);
     },
     observe(observation: ObservationInit): void {
-      assertObservationInit(observation, "ctx.observe");
+      assertObservationInit(observation, "ctx.observe", registry);
       collector.observations.push(observation);
     },
     finding(finding: FindingInput): void {
@@ -725,12 +801,17 @@ function buildReviewResult(input: {
   filesScanned?: number;
   collector: ReviewCollector;
   policy: ReviewPolicy;
+  registry: RuleRegistry;
   includeSuppressed?: boolean;
   includeRawObservations?: boolean;
   timing?: ReviewResult["timing"];
 }): ReviewResult {
   const thresholds = input.policy.confidenceThresholds ?? DEFAULT_CONFIDENCE_THRESHOLDS;
-  const synthesized = synthesizeObservationFindings(input.collector.observations, thresholds);
+  const synthesized = synthesizeObservationFindings(
+    input.collector.observations,
+    thresholds,
+    input.registry,
+  );
   const allFindings = deduplicateFindings([...synthesized, ...input.collector.findings]).map(
     (finding) => calibrateFindingSeverity(finding, input.policy),
   );
@@ -787,12 +868,13 @@ function buildReviewResult(input: {
 function synthesizeObservationFindings(
   observations: ObservationInit[],
   thresholds: ConfidenceThresholds,
+  registry: RuleRegistry,
 ): ReviewFinding[] {
   const grouped = new Map<string, ObservationInit[]>();
   const seen = new Set<string>();
 
   for (const observation of observations) {
-    const rule = ruleRegistry.lookup(observation.ruleId);
+    const rule = registry.lookup(observation.ruleId);
     const groupKey = observation.groupKey ?? defaultObservationGroupKey(observation, rule);
     const dedupeKey = stableStringify({ groupKey, observation });
     if (observation.deduplicate !== false && seen.has(dedupeKey)) {
@@ -808,7 +890,7 @@ function synthesizeObservationFindings(
       throw new Error("Cannot synthesize finding from an empty observation group.");
     }
 
-    const rule = ruleRegistry.lookup(first.ruleId);
+    const rule = registry.lookup(first.ruleId);
     const synthesis = rule?.aggregate?.(group) ?? {};
     const synthesisSource = rule?.aggregate === undefined ? "generic" : "rule";
     log.debug(
@@ -1502,11 +1584,15 @@ function uniqueStrings(values: string[]): string[] {
   return [...new Set(values.filter(isNonEmptyString))].sort(compareStrings);
 }
 
-function assertObservationInit(value: ObservationInit, source: string): void {
+function assertObservationInit(
+  value: ObservationInit,
+  source: string,
+  registry: RuleRegistry,
+): void {
   requireString(value.ruleId, `${source}.ruleId`);
   requireString(value.subject, `${source}.subject`);
   requireObservationTitle(value.title, `${source}.title`);
-  const rule = ruleRegistry.lookup(value.ruleId);
+  const rule = registry.lookup(value.ruleId);
   if (value.category === undefined && rule?.category === undefined) {
     throw new Error(`${source}.category is required when rule.category is not defined.`);
   }
