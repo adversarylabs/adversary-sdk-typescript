@@ -1,5 +1,5 @@
 {
-  "name": "@adversary/sdk",
+  "name": "@adversarylabs/sdk",
   "version": "0.1.0",
   "description": "Small TypeScript SDK for authoring Adversaries.",
   "type": "module",

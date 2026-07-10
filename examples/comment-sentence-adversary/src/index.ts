@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { Adversary } from "@adversary/sdk";
+import { Adversary } from "@adversarylabs/sdk";
 
 const adversary = new Adversary({
   name: "adversarylabs/comment-sentences",

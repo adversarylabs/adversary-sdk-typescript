@@ -1,5 +1,5 @@
 import { pathToFileURL } from "node:url";
-import { Adversary, Severity } from "@adversary/sdk";
+import { Adversary, Severity } from "@adversarylabs/sdk";
 
 const adversary = new Adversary({
   name: "adversarylabs/basic",

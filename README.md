@@ -9,7 +9,7 @@ and write runtime output.
 ## Install
 
 ```bash
-npm install @adversary/sdk
+npm install @adversarylabs/sdk
 ```
 
 Requires Node 22 or newer and ESM.
@@ -17,7 +17,7 @@ Requires Node 22 or newer and ESM.
 ## Author an adversary
 
 ```ts
-import { Adversary, Severity, defineRule, log } from "@adversary/sdk";
+import { Adversary, Severity, defineRule, log } from "@adversarylabs/sdk";
 
 const app = new Adversary({
   name: "adversarylabs/comment-sentences"
@@ -375,7 +375,7 @@ findings:
 ```ts
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { Adversary, defineRule } from "@adversary/sdk";
+import { Adversary, defineRule } from "@adversarylabs/sdk";
 
 const app = new Adversary({
   name: "adversarylabs/comment-sentences",
