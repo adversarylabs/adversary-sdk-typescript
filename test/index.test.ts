@@ -554,6 +554,25 @@ describe("review pipeline", () => {
     expect(output.findings[0]?.whyItMatters).toBe("Comments should add context.");
   });
 
+  it("uses stable note keys instead of domain vocabulary to deduplicate review notes", async () => {
+    const app = new Adversary({ name: "comment-review" });
+    app.rule("comments", (ctx) => {
+      ctx.review.positive({
+        key: "comments.behavior",
+        summary: "Comments describe runtime behavior.",
+      });
+      ctx.review.observe({
+        key: "comments.intent",
+        summary: "Comments explain runtime intent.",
+      });
+    });
+
+    const result = await app.run({ input: { source: { path: "/repo" } }, write: false });
+
+    expect(result.positives).toHaveLength(1);
+    expect(result.observations).toHaveLength(1);
+  });
+
   it("renders terminal and JSON output", async () => {
     const app = new Adversary({
       name: "comment-sentences",
