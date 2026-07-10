@@ -9,9 +9,6 @@ describe("basic adversary", () => {
           path: process.cwd(),
         },
       },
-      review: {
-        includeInformational: true,
-      },
     });
 
     expect(output.findings).toHaveLength(1);

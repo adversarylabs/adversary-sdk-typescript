@@ -35,7 +35,7 @@ before inviting third-party adversary authors or declaring a stable v1 API.
 | Runtime API side effects | Complete | `sdk/runtime-api-separation` | Pure `run({ input })`; environment parsing and output writing live in `runFromEnvironment()` |
 | Validation and result semantics | Complete | `sdk/model-validation` | Policies, aggregate results, scores, evidence, and remediation validated; timing opt-in |
 | npm package hardening | Complete | `sdk/package-hardening` | Self-building tarball, clean JS/TS consumer test, metadata, license, usable maps, Node 22/24 CI |
-| Starter template and tooling | Planned | `sdk/starter-template` | Depends on package hardening |
+| Starter template and tooling | Complete | `sdk/starter-template` | Visible SDK result, reproducible non-root container, lockfile, and vulnerability-free dev tooling |
 
 ## Bottom line
 
@@ -346,6 +346,9 @@ path from an error to the source repository.
 
 ### 12. Test every supported Node line
 
+**Status: Complete on `sdk/package-hardening`.** Pull requests execute the complete suite on Node
+22 and Node 24.
+
 The package declares `node >=22`, but CI only executes Node 22. Node 24 is the current LTS line as
 of this review, while Node 22 remains LTS. Test at least the minimum supported major and current LTS
 (22 and 24). Optionally test the current release line without making it blocking immediately.
@@ -353,6 +356,9 @@ of this review, while Node 22 remains LTS. Test at least the minimum supported m
 The existing `NodeNext`/ES2022 configuration is appropriate for this support policy.
 
 ### 13. Repair the bundled starter experience
+
+**Status: Complete on `sdk/starter-template`.** The starter visibly emits its demonstration result,
+ships a shrinkwrap and `.dockerignore`, uses `npm ci`, and builds a small non-root runtime stage.
 
 The basic template's only finding is informational ([template source](./templates/basic/src/index.ts#L8)),
 but default policy suppresses informational findings. Running the generated adversary normally can
@@ -370,6 +376,9 @@ Also address these template concerns:
 ## Priority 3: operational and maintainability improvements
 
 ### 14. Update vulnerable development tooling
+
+**Status: Complete on `sdk/starter-template`.** Vitest 4 replaces the vulnerable Vitest 2/Vite
+chain; the full dependency audit reports zero vulnerabilities.
 
 The package has no vulnerable production dependencies (`npm audit --omit=dev` reported zero), which
 is excellent. The full audit currently reports five development-chain advisories, including a
