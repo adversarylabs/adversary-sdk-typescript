@@ -288,10 +288,16 @@ export interface AdversaryOptions {
 }
 
 export interface RunOptions {
+  input: RuntimeInput;
+  review?: ReviewPolicy;
+  includeSuppressed?: boolean;
+  includeRawObservations?: boolean;
+}
+
+export interface EnvironmentRunOptions {
   input?: RuntimeInput;
   inputPath?: string;
   outputPath?: string;
-  write?: boolean;
   review?: ReviewPolicy;
   includeSuppressed?: boolean;
   includeRawObservations?: boolean;
@@ -456,17 +462,15 @@ export class Adversary {
     this.rules.push({ id, handler });
   }
 
-  async run(options: RunOptions = {}): Promise<ReviewResult> {
+  async run(options: RunOptions): Promise<ReviewResult> {
     const startedAt = performance.now();
-    const input = options.input ?? (await parseInput(options.inputPath));
-    const repoPath = process.env.ADVERSARY_REPO ?? input.source.path;
+    const repoPath = options.input.source.path;
     const summary: Summary = {};
     const cache = new Map<string, unknown>();
     const collector = createReviewCollector();
     const registry = this.ruleDefinitions.snapshot();
     const context = createRuleContext(repoPath, summary, cache, collector, registry);
-    const includeSuppressed =
-      options.includeSuppressed ?? parseBooleanEnv(process.env.ADVERSARY_INCLUDE_SUPPRESSED);
+    const includeSuppressed = options.includeSuppressed;
 
     for (const rule of this.rules) {
       log.debug(`running rule ${rule.id}`);
@@ -485,11 +489,28 @@ export class Adversary {
       timing: { totalMs: Math.round(performance.now() - startedAt) },
     });
 
-    if (options.write !== false) {
-      await writeOutput(createAdversaryRunEnvelope(output), options.outputPath);
-    }
-
     return output;
+  }
+
+  async runFromEnvironment(options: EnvironmentRunOptions = {}): Promise<ReviewResult> {
+    const input =
+      options.input ??
+      (await parseInput(options.inputPath ?? process.env.ADVERSARY_INPUT ?? DEFAULT_INPUT_PATH));
+    const repository = options.input
+      ? input.source.path
+      : (process.env.ADVERSARY_REPO ?? input.source.path);
+    const result = await this.run({
+      input: { ...input, source: { ...input.source, path: repository } },
+      review: options.review,
+      includeSuppressed:
+        options.includeSuppressed ?? parseBooleanEnv(process.env.ADVERSARY_INCLUDE_SUPPRESSED),
+      includeRawObservations: options.includeRawObservations,
+    });
+    await writeOutput(
+      createAdversaryRunEnvelope(result),
+      options.outputPath ?? process.env.ADVERSARY_OUTPUT ?? DEFAULT_OUTPUT_PATH,
+    );
+    return result;
   }
 }
 
@@ -500,9 +521,7 @@ export function createAdversaryRunEnvelope(result: ReviewResult): AdversaryRunEn
   };
 }
 
-export async function parseInput(
-  path = process.env.ADVERSARY_INPUT ?? DEFAULT_INPUT_PATH,
-): Promise<RuntimeInput> {
+export async function parseInput(path = DEFAULT_INPUT_PATH): Promise<RuntimeInput> {
   const raw = await readFile(path, "utf8");
   const parsed: unknown = JSON.parse(raw);
 
@@ -521,10 +540,7 @@ export async function parseInput(
   return parsed as RuntimeInput;
 }
 
-export async function writeOutput(
-  output: unknown,
-  path = process.env.ADVERSARY_OUTPUT ?? DEFAULT_OUTPUT_PATH,
-): Promise<void> {
+export async function writeOutput(output: unknown, path = DEFAULT_OUTPUT_PATH): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, `${JSON.stringify(output, null, 2)}\n`, "utf8");
 }

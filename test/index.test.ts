@@ -95,7 +95,6 @@ describe("Adversary", () => {
 
     const output = await app.run({
       input: { source: { path: process.cwd() } },
-      write: false,
     });
 
     expect(output.findings.map((finding) => finding.ruleId)).toEqual(["single", "second"]);
@@ -110,7 +109,6 @@ describe("Adversary", () => {
 
     const output = await app.run({
       input: { source: { path: process.cwd() } },
-      write: false,
     });
 
     expect(output).toMatchObject({
@@ -147,7 +145,6 @@ describe("Adversary", () => {
 
     const output = await app.run({
       input: { source: { path: process.cwd() } },
-      write: false,
     });
 
     expect(output.findings.map((finding) => finding.ruleId)).toEqual(["a", "b", "c"]);
@@ -190,7 +187,7 @@ describe("Adversary", () => {
     });
   });
 
-  it("uses CLI environment defaults when app.run is called without options", async () => {
+  it("uses CLI environment defaults through the runtime adapter", async () => {
     const directory = await mkdtemp(join(tmpdir(), "adversary-sdk-env-"));
     const inputPath = join(directory, "input.json");
     const outputPath = join(directory, "output.json");
@@ -231,7 +228,7 @@ describe("Adversary", () => {
       });
     });
 
-    const result = await app.run();
+    const result = await app.runFromEnvironment();
     const written = JSON.parse(await readFile(outputPath, "utf8"));
 
     expect(result.target.repository).toBe(envRepoPath);
@@ -242,6 +239,21 @@ describe("Adversary", () => {
       protocolVersion: 1,
       result,
     });
+  });
+
+  it("keeps programmatic runs independent of environment paths", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "adversary-sdk-library-"));
+    const ambientOutput = join(directory, "ambient-output.json");
+    process.env.ADVERSARY_REPO = "/ambient-repo";
+    process.env.ADVERSARY_OUTPUT = ambientOutput;
+
+    const app = new Adversary({ name: "adversarylabs/test" });
+    app.rule("repository", (ctx) => expect(ctx.repoPath).toBe("/explicit-repo"));
+
+    const result = await app.run({ input: { source: { path: "/explicit-repo" } } });
+
+    expect(result.target.repository).toBe("/explicit-repo");
+    await expect(readFile(ambientOutput, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("exposes repo helpers on rule context", async () => {
@@ -260,7 +272,6 @@ describe("Adversary", () => {
 
     await app.run({
       input: { source: { path: repoPath } },
-      write: false,
     });
   });
 });
@@ -306,7 +317,6 @@ describe("review pipeline", () => {
 
     const output = await app.run({
       input: { source: { path: "/repo" } },
-      write: false,
     });
 
     expect(output.findings).toHaveLength(1);
@@ -365,7 +375,7 @@ describe("review pipeline", () => {
       }
     });
 
-    const output = await app.run({ input: { source: { path: "/repo" } }, write: false });
+    const output = await app.run({ input: { source: { path: "/repo" } } });
 
     expect(output.findings).toHaveLength(1);
     expect(output.findings[0]).toMatchObject({
@@ -429,7 +439,7 @@ describe("review pipeline", () => {
       }
     });
 
-    const output = await app.run({ input: { source: { path: "/repo" } }, write: false });
+    const output = await app.run({ input: { source: { path: "/repo" } } });
 
     expect(output.findings[0]).toMatchObject({
       title: "Aggregated observations",
@@ -458,7 +468,7 @@ describe("review pipeline", () => {
       ctx.observe(observation);
     });
 
-    const output = await app.run({ input: { source: { path: "/repo" } }, write: false });
+    const output = await app.run({ input: { source: { path: "/repo" } } });
 
     expect(output.findings).toHaveLength(1);
     expect(output.findings[0]?.groupKey).toBe("custom-group");
@@ -500,7 +510,6 @@ describe("review pipeline", () => {
 
     const output = await app.run({
       input: { source: { path: "/repo" } },
-      write: false,
       includeSuppressed: true,
     });
 
@@ -545,7 +554,7 @@ describe("review pipeline", () => {
       });
     });
 
-    const output = await app.run({ input: { source: { path: "/repo" } }, write: false });
+    const output = await app.run({ input: { source: { path: "/repo" } } });
 
     expect(output.assessment?.risk).toBe("low");
     expect(output.positives).toHaveLength(1);
@@ -567,7 +576,7 @@ describe("review pipeline", () => {
       });
     });
 
-    const result = await app.run({ input: { source: { path: "/repo" } }, write: false });
+    const result = await app.run({ input: { source: { path: "/repo" } } });
 
     expect(result.positives).toHaveLength(1);
     expect(result.observations).toHaveLength(1);
@@ -597,7 +606,7 @@ describe("review pipeline", () => {
     }
 
     const [firstResult, secondResult] = await Promise.all(
-      [first, second].map((app) => app.run({ input: { source: { path: "/repo" } }, write: false })),
+      [first, second].map((app) => app.run({ input: { source: { path: "/repo" } } })),
     );
 
     expect(firstResult.findings[0]?.title).toBe("First definition");
@@ -627,7 +636,7 @@ describe("review pipeline", () => {
       });
     });
 
-    const result = await app.run({ input: { source: { path: "/repo" } }, write: false });
+    const result = await app.run({ input: { source: { path: "/repo" } } });
     expect(result.findings[0]?.title).toBe("Replacement definition");
   });
 
@@ -654,7 +663,7 @@ describe("review pipeline", () => {
         remediation: { complexity: "trivial" },
       });
     });
-    const result = await app.run({ input: { source: { path: "/repo" } }, write: false });
+    const result = await app.run({ input: { source: { path: "/repo" } } });
     let terminal = "";
     let json = "";
 
@@ -704,7 +713,7 @@ describe("review pipeline", () => {
       });
     });
 
-    const result = await app.run({ input: { source: { path: "/repo" } }, write: false });
+    const result = await app.run({ input: { source: { path: "/repo" } } });
     let terminal = "";
 
     new TerminalRenderer((text) => {
@@ -768,7 +777,7 @@ describe("review pipeline", () => {
       }
     });
 
-    const result = await app.run({ input: { source: { path: "/repo" } }, write: false });
+    const result = await app.run({ input: { source: { path: "/repo" } } });
     let terminal = "";
 
     new TerminalRenderer((text) => {
@@ -903,7 +912,7 @@ describe("review pipeline", () => {
       });
     });
 
-    const result = await app.run({ input: { source: { path: "/repo" } }, write: false });
+    const result = await app.run({ input: { source: { path: "/repo" } } });
     const finding = result.findings[0];
 
     expect(finding).toMatchObject({
@@ -952,7 +961,7 @@ describe("review pipeline", () => {
       });
     });
 
-    const result = await app.run({ input: { source: { path: "/repo" } }, write: false });
+    const result = await app.run({ input: { source: { path: "/repo" } } });
 
     expect(result.assessment?.summary).toBe(
       "Comments are concentrated near the parsing flow. The only material concern identified is that the three comments are complete sentences.",
@@ -985,7 +994,7 @@ describe("review pipeline", () => {
       });
     });
 
-    const result = await app.run({ input: { source: { path: "/repo" } }, write: false });
+    const result = await app.run({ input: { source: { path: "/repo" } } });
 
     expect(result.opinion?.summary).toMatchInlineSnapshot(
       `"I would address the remaining findings before production."`,
@@ -996,7 +1005,7 @@ describe("review pipeline", () => {
     const app = new Adversary({ name: "empty-comment-review" });
     app.rule("comments", () => {});
 
-    const result = await app.run({ input: { source: { path: "/repo" } }, write: false });
+    const result = await app.run({ input: { source: { path: "/repo" } } });
 
     expect(result.opinion?.summary).toMatchInlineSnapshot(`"I would ship this as-is."`);
   });
@@ -1083,7 +1092,7 @@ describe("review pipeline", () => {
       }
     });
 
-    const result = await app.run({ input: { source: { path: "/repo" } }, write: false });
+    const result = await app.run({ input: { source: { path: "/repo" } } });
     let terminal = "";
     new TerminalRenderer((text) => {
       terminal += text;
@@ -1206,7 +1215,7 @@ describe("review pipeline", () => {
           });
         }
       });
-      const result = await app.run({ input: { source: { path: "/repo" } }, write: false });
+      const result = await app.run({ input: { source: { path: "/repo" } } });
       console.log(JSON.stringify({
         hasRule: app.hasRuleDefinition(ruleId),
         finding: result.findings[0],
@@ -1275,7 +1284,7 @@ describe("review pipeline", () => {
       }
     });
 
-    const result = await app.run({ input: { source: { path: process.cwd() } }, write: false });
+    const result = await app.run({ input: { source: { path: process.cwd() } } });
 
     expect(result.findings.map(({ summary }) => summary)).toEqual([
       "First explanation.",
@@ -1297,7 +1306,7 @@ describe("review pipeline", () => {
       });
     });
 
-    const result = await app.run({ input: { source: { path: process.cwd() } }, write: false });
+    const result = await app.run({ input: { source: { path: process.cwd() } } });
 
     expect(result.findings[0]?.evidence).toEqual([
       { location: { file: "src/index.ts", line: 3 }, data: { parser: "comments" } },

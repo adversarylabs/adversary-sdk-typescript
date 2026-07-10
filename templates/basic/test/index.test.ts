@@ -12,7 +12,6 @@ describe("basic adversary", () => {
       review: {
         includeInformational: true,
       },
-      write: false,
     });
 
     expect(output.findings).toHaveLength(1);
