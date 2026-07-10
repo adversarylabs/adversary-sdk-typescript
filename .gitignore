@@ -4,3 +4,4 @@ coverage/
 .direnv/
 .DS_Store
 *.log
+SDK_REVIEW.md
