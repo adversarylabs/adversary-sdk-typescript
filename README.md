@@ -328,7 +328,7 @@ type ReviewResult = {
   scores?: ReviewScore[];
   findings: ReviewFinding[];
   opinion?: { ship?: boolean; summary: string };
-  suppressed: { observations: number; findings: number };
+  suppressed: { findings: number };
   timing?: { totalMs?: number };
 };
 ```
@@ -524,7 +524,6 @@ Output shape:
     "observations": [],
     "findings": [],
     "suppressed": {
-      "observations": 0,
       "findings": 0
     }
   }

@@ -231,7 +231,6 @@ export interface ReviewResult {
   findings: ReviewFinding[];
   opinion?: ReviewOpinion;
   suppressed: {
-    observations: number;
     findings: number;
   };
   timing?: {
@@ -258,7 +257,6 @@ export interface RuntimeInput {
 
 export interface Summary {
   files_scanned?: number;
-  [key: string]: number | string | boolean | null | undefined;
 }
 
 export interface RuleContext {
@@ -292,6 +290,7 @@ export interface RunOptions {
   review?: ReviewPolicy;
   includeSuppressed?: boolean;
   includeRawObservations?: boolean;
+  includeTiming?: boolean;
 }
 
 export interface EnvironmentRunOptions {
@@ -301,6 +300,7 @@ export interface EnvironmentRunOptions {
   review?: ReviewPolicy;
   includeSuppressed?: boolean;
   includeRawObservations?: boolean;
+  includeTiming?: boolean;
 }
 
 export interface ReviewRenderer {
@@ -432,6 +432,7 @@ export class Adversary {
     this.name = options.name;
     this.version = options.version;
     this.reviewPolicy = cloneReviewPolicy(options.review ?? {});
+    assertReviewPolicy(this.reviewPolicy, `adversary "${this.name}" review policy`);
     this.ruleDefinitions = ruleRegistry.snapshot();
   }
 
@@ -464,6 +465,7 @@ export class Adversary {
 
   async run(options: RunOptions): Promise<ReviewResult> {
     const startedAt = performance.now();
+    assertReviewPolicy(options.review ?? {}, `adversary "${this.name}" run review policy`);
     const repoPath = options.input.source.path;
     const summary: Summary = {};
     const cache = new Map<string, unknown>();
@@ -486,7 +488,9 @@ export class Adversary {
       registry,
       includeSuppressed,
       includeRawObservations: options.includeRawObservations,
-      timing: { totalMs: Math.round(performance.now() - startedAt) },
+      timing: options.includeTiming
+        ? { totalMs: Math.round(performance.now() - startedAt) }
+        : undefined,
     });
 
     return output;
@@ -505,6 +509,7 @@ export class Adversary {
       includeSuppressed:
         options.includeSuppressed ?? parseBooleanEnv(process.env.ADVERSARY_INCLUDE_SUPPRESSED),
       includeRawObservations: options.includeRawObservations,
+      includeTiming: options.includeTiming,
     });
     await writeOutput(
       createAdversaryRunEnvelope(result),
@@ -897,7 +902,6 @@ function buildReviewResult(input: {
     findings: eligible,
     opinion: input.collector.opinion ?? synthesizeOpinion(eligible),
     suppressed: {
-      observations: 0,
       findings: suppressedFindings.length,
     },
     timing: input.timing,
@@ -957,7 +961,7 @@ function synthesizeObservationFindings(
       first.severityAggregation ?? "highest",
     );
 
-    return {
+    const finding: ReviewFinding = {
       id: synthesis.id ?? stableId(`${first.ruleId}:${groupKey}`),
       ruleId: synthesis.ruleId ?? first.ruleId,
       groupKey: synthesis.groupKey ?? groupKey,
@@ -981,6 +985,8 @@ function synthesizeObservationFindings(
       tags: synthesis.tags ?? uniqueStrings(group.flatMap((observation) => observation.tags ?? [])),
       metadata: synthesis.metadata ?? first.metadata,
     };
+    assertFindingInput(finding, `adversary aggregate rule "${first.ruleId}"`);
+    return finding;
   });
 }
 
@@ -1702,6 +1708,7 @@ function assertFindingInput(value: FindingInput, source: string): void {
   optionalString(value.ruleId, `${source}.ruleId`);
   optionalString(value.groupKey, `${source}.groupKey`);
   optionalStringArray(value.tags, `${source}.tags`);
+  optionalRemediation(value.remediation, `${source}.remediation`);
 }
 
 function assertReviewNote(value: ReviewNoteInput, source: string): void {
@@ -1716,11 +1723,17 @@ function assertReviewNote(value: ReviewNoteInput, source: string): void {
 
 function assertReviewScore(value: ReviewScore): void {
   requireString(value.key, "ctx.review.score.key");
-  if (typeof value.score !== "number" || Number.isNaN(value.score)) {
-    throw new Error("ctx.review.score.score must be a number.");
+  if (typeof value.score !== "number" || !Number.isFinite(value.score)) {
+    throw new Error("ctx.review.score.score must be a finite number.");
   }
-  if (value.max !== undefined && (typeof value.max !== "number" || Number.isNaN(value.max))) {
-    throw new Error("ctx.review.score.max must be a number.");
+  if (value.max !== undefined && (typeof value.max !== "number" || !Number.isFinite(value.max))) {
+    throw new Error("ctx.review.score.max must be a finite number.");
+  }
+  if (value.score < 0) {
+    throw new Error("ctx.review.score.score must be greater than or equal to zero.");
+  }
+  if (value.max !== undefined && (value.max <= 0 || value.score > value.max)) {
+    throw new Error("ctx.review.score.max must be positive and no smaller than score.");
   }
   optionalString(value.label, "ctx.review.score.label");
   optionalString(value.summary, "ctx.review.score.summary");
@@ -1749,6 +1762,41 @@ function assertRuleDefinition(rule: RuleDefinition): void {
   optionalStringArray(rule.groupBy, "rule.groupBy");
   if (rule.aggregate !== undefined && typeof rule.aggregate !== "function") {
     throw new Error("rule.aggregate must be a function.");
+  }
+}
+
+function assertReviewPolicy(policy: ReviewPolicy, source: string): void {
+  if (policy.minimumConfidence !== undefined && !isConfidence(policy.minimumConfidence)) {
+    throw new Error(`${source}.minimumConfidence must be one of low, medium, high.`);
+  }
+  if (
+    policy.maximumFindings !== undefined &&
+    (!Number.isInteger(policy.maximumFindings) || policy.maximumFindings < 0)
+  ) {
+    throw new Error(`${source}.maximumFindings must be a non-negative integer.`);
+  }
+  if (policy.confidenceThresholds !== undefined) {
+    const { medium, high } = policy.confidenceThresholds;
+    if (medium < 0 || high > 1 || medium > high) {
+      throw new Error(`${source}.confidenceThresholds must satisfy 0 <= medium <= high <= 1.`);
+    }
+  }
+  for (const [ruleId, severity] of Object.entries(policy.severityOverrides ?? {})) {
+    if (!isSeverity(severity)) {
+      throw new Error(`${source}.severityOverrides["${ruleId}"] is not a valid severity.`);
+    }
+  }
+}
+
+function optionalRemediation(value: Remediation | undefined, field: string): void {
+  if (value === undefined) return;
+  if (!isRecord(value)) throw new Error(`${field} must be an object.`);
+  if (
+    value.complexity !== undefined &&
+    (typeof value.complexity !== "string" ||
+      !["trivial", "small", "medium", "large", "architectural"].includes(value.complexity))
+  ) {
+    throw new Error(`${field}.complexity is invalid.`);
   }
 }
 
@@ -1800,6 +1848,12 @@ function optionalEvidence(value: EvidenceInput | Evidence | undefined, field: st
     optionalString(value.location.file, `${field}.location.file`);
     optionalPositiveInteger(value.location.line, `${field}.location.line`);
     optionalPositiveInteger(value.location.endLine, `${field}.location.endLine`);
+  }
+  if (value.data !== undefined && !isRecord(value.data)) {
+    throw new Error(`${field}.data must be an object.`);
+  }
+  if (input.metadata !== undefined && !isRecord(input.metadata)) {
+    throw new Error(`${field}.metadata must be an object.`);
   }
 }
 
