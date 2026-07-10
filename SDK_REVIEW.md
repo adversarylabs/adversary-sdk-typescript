@@ -29,7 +29,7 @@ before inviting third-party adversary authors or declaring a stable v1 API.
 | Review item | Status | Branch/PR | Notes |
 | --- | --- | --- | --- |
 | Wire schema mismatch | Complete | `sdk/protocol-schema-v1` | Canonical `adversary.run.v1` envelope schema; result schema is `adversary.review.v1` |
-| Docker policy in core | Planned | `sdk/domain-boundary` | Depends on protocol schema |
+| Docker policy in core | Complete | `sdk/domain-boundary` | Generic synthesis now uses authored summaries, recommendations, and stable note keys only |
 | Global rule registry | Planned | `sdk/instance-rule-registry` | Depends on domain boundary |
 | Evidence model and deduplication | Planned | `sdk/evidence-model` | Depends on instance registry |
 | Runtime API side effects | Planned | `sdk/runtime-api-separation` | Depends on evidence model |
@@ -108,6 +108,11 @@ Recommended change:
 Do not leave two plausible contracts in the same package.
 
 ### 2. Move Docker knowledge out of the generic engine
+
+**Status: Complete on `sdk/domain-boundary`.** Dockerfile detection, digest/stage handling,
+Docker-specific opinion subjects, tag-based runtime ranking, and the fixed domain vocabulary were
+removed. Review-note deduplication now uses stable keys or exact normalized identity; domain rules
+remain responsible for their presentation language.
 
 The generic synthesis layer currently contains all of the following:
 

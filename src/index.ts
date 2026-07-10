@@ -985,20 +985,14 @@ function notesDescribeSameFact(positive: ReviewNote, observation: ReviewNote): b
 
   const positiveText = normalizeSemanticText(`${positive.key} ${positive.summary}`);
   const observationText = normalizeSemanticText(`${observation.key} ${observation.summary}`);
-  if (positiveText.length > 0 && positiveText === observationText) {
-    return true;
-  }
-
-  const positiveSignals = highSignalSemanticTokens(positiveText);
-  const observationSignals = highSignalSemanticTokens(observationText);
-  return positiveSignals.some((token) => observationSignals.includes(token));
+  return positiveText.length > 0 && positiveText === observationText;
 }
 
 function synthesizeAssessment(
   findings: ReviewFinding[],
   positives: ReviewNote[] = [],
 ): ReviewAssessment {
-  const strength = assessmentStrength(positives[0], findings);
+  const strength = assessmentStrength(positives[0]);
 
   if (findings.length === 0) {
     return {
@@ -1034,16 +1028,9 @@ function synthesizeAssessment(
   };
 }
 
-function assessmentStrength(
-  positive: ReviewNote | undefined,
-  findings: ReviewFinding[],
-): string | undefined {
+function assessmentStrength(positive: ReviewNote | undefined): string | undefined {
   if (positive === undefined) {
     return undefined;
-  }
-
-  if (findingsReferenceDockerfile(findings)) {
-    return "This is a well-structured production Dockerfile.";
   }
 
   const summary = normalizeParagraph(positive.summary);
@@ -1054,13 +1041,6 @@ function assessmentStrength(
 }
 
 function assessmentConcern(finding: ReviewFinding): string {
-  const title = findingConcern(finding);
-  const recommendation = recommendationSubject(finding.recommendation);
-  if (recommendation === "Digest pinning" || /base images?.*digest/i.test(title)) {
-    const plural = /base images\b/i.test(title);
-    return `that the base ${plural ? "images are" : "image is"} referenced by mutable tags rather than immutable digests`;
-  }
-
   const summary = normalizeParagraph(finding.summary).split(/(?<=[.!?])\s+/, 1)[0];
   return concernClause(
     lowercaseFirst(trimTrailingSentencePunctuation(summary ?? findingConcern(finding))),
@@ -1096,7 +1076,6 @@ function synthesizeOpinion(findings: ReviewFinding[]): ReviewOpinion | undefined
 
   const highestSeverity = highestFindingSeverity(findings);
   const ship = severityWeight(highestSeverity) < severityWeight(Severity.High);
-  const subject = findingsReferenceDockerfile(findings) ? "this Dockerfile" : "this";
 
   if (findings.length > 1) {
     return {
@@ -1110,18 +1089,9 @@ function synthesizeOpinion(findings: ReviewFinding[]): ReviewOpinion | undefined
   return {
     ship,
     summary: ship
-      ? `I would ship ${subject} as-is. ${improvement} is the only improvement I would recommend before production.`
+      ? `I would ship this as-is. ${improvement} is the only improvement I would recommend before production.`
       : `${improvement} is the most important improvement to address before production.`,
   };
-}
-
-function findingsReferenceDockerfile(findings: ReviewFinding[]): boolean {
-  const files = findings.flatMap((finding) =>
-    finding.evidence
-      .map((evidence) => evidence.location?.file ?? evidence.file)
-      .filter(isNonEmptyString),
-  );
-  return files.length > 0 && files.every((file) => /(?:^|\/)Dockerfile$/.test(file));
 }
 
 function deduplicateScores(scores: ReviewScore[]): ReviewScore[] {
@@ -1173,11 +1143,6 @@ function structuredEvidenceMessage(evidence: Record<string, unknown>): string | 
   const explicitMessage = stringFromUnknown(evidence.message);
   if (explicitMessage !== undefined) {
     return explicitMessage;
-  }
-
-  const stage = stringFromUnknown(evidence.stage);
-  if (stage !== undefined) {
-    return `${stage} stage`;
   }
 
   const label = stringFromUnknown(evidence.label) ?? stringFromUnknown(evidence.name);
@@ -1282,7 +1247,6 @@ function renderObservationTemplate(template: string, group: ObservationInit[]): 
 function observationTemplateValues(group: ObservationInit[]): Record<string, string> {
   const first = group[0];
   const subjects = uniqueStrings(group.map((observation) => observation.subject));
-  const stages = uniqueStrings(group.map(extractStage).filter(isNonEmptyString));
   const locations = uniqueStrings(group.map(formatObservationLocation).filter(isNonEmptyString));
 
   return omitUndefined({
@@ -1291,8 +1255,6 @@ function observationTemplateValues(group: ObservationInit[]): Record<string, str
     locations: joinHumanList(locations),
     subject: first?.subject,
     subjects: joinHumanList(subjects),
-    stage: stages[0],
-    stages: joinHumanList(stages),
   });
 }
 
@@ -1303,21 +1265,6 @@ function observationValue(observation: ObservationInit, field: string): unknown 
     }, observation);
   }
   return (observation as unknown as Record<string, unknown>)[field];
-}
-
-function extractStage(observation: ObservationInit): string | undefined {
-  if (isRecord(observation.evidence)) {
-    const explicit = stringFromUnknown(observation.evidence.stage);
-    if (explicit !== undefined) {
-      return explicit;
-    }
-    const label = stringFromUnknown(observation.evidence.label);
-    if (label !== undefined) {
-      return trimTrailingWord(label, "stage");
-    }
-  }
-
-  return trimTrailingWord(observation.location?.label, "stage");
 }
 
 function formatObservationLocation(observation: ObservationInit): string | undefined {
@@ -1371,11 +1318,6 @@ function recommendationSubject(recommendation: string | undefined): string | und
   }
 
   const normalized = trimTrailingSentencePunctuation(normalizeParagraph(recommendation));
-  const pinDigest = normalized.match(/\bpin\b.*\bby digest\b/i);
-  if (pinDigest !== null) {
-    return "Digest pinning";
-  }
-
   const firstClause = normalized.split(/\s+(?:and|when|where|with)\s+/i)[0]?.trim();
   if (!isNonEmptyString(firstClause)) {
     return undefined;
@@ -1397,6 +1339,7 @@ function gerundPhrase(phrase: string): string {
 function toGerund(verb: string): string {
   const lower = verb.toLowerCase();
   const irregular: Record<string, string> = {
+    pin: "pinning",
     run: "running",
     use: "using",
   };
@@ -1408,23 +1351,6 @@ function toGerund(verb: string): string {
     return `${lower.slice(0, -1)}ing`;
   }
   return `${lower}ing`;
-}
-
-function highSignalSemanticTokens(value: string): string[] {
-  return value
-    .split(" ")
-    .map(canonicalSemanticToken)
-    .filter((word) => highSignalReviewTerms.has(word));
-}
-
-function canonicalSemanticToken(value: string): string {
-  if (value === "stages") {
-    return "stage";
-  }
-  if (value === "artifacts") {
-    return "artifact";
-  }
-  return trimTrailingWord(trimTrailingWord(value, "ing"), "ed") ?? value;
 }
 
 function normalizeSemanticText(value: string): string {
@@ -1472,13 +1398,11 @@ function calibrateFindingSeverity(finding: ReviewFinding, policy: ReviewPolicy):
 
 function scoreFinding(finding: ReviewFinding): number {
   const locationScore = Math.min(finding.evidence.length, 5) * 3;
-  const runtimeScore = finding.tags?.some((tag) => ["production", "runtime"].includes(tag)) ? 8 : 0;
   const remediationScore = finding.remediation?.complexity === "trivial" ? 3 : 0;
   return (
     severityWeight(finding.severity) * 10 +
     confidenceWeight(finding.confidence) * 12 +
     locationScore +
-    runtimeScore +
     remediationScore
   );
 }
@@ -1819,15 +1743,6 @@ const semanticStopWords = new Set([
   "to",
   "uses",
   "using",
-]);
-
-const highSignalReviewTerms = new Set([
-  "artifact",
-  "builder",
-  "digest",
-  "multi",
-  "runtime",
-  "stage",
 ]);
 
 function formatEvidenceLocation(evidence: Evidence): string {
