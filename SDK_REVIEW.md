@@ -31,7 +31,7 @@ before inviting third-party adversary authors or declaring a stable v1 API.
 | Wire schema mismatch | Complete | `sdk/protocol-schema-v1` | Canonical `adversary.run.v1` envelope schema; result schema is `adversary.review.v1` |
 | Docker policy in core | Complete | `sdk/domain-boundary` | Generic synthesis now uses authored summaries, recommendations, and stable note keys only |
 | Global rule registry | Complete | `sdk/instance-rule-registry` | Instance registries, duplicate rejection, explicit replacement, deprecated global compatibility |
-| Evidence model and deduplication | Planned | `sdk/evidence-model` | Depends on instance registry |
+| Evidence model and deduplication | Complete | `sdk/evidence-model` | Canonical nested locations and `data`; compatibility normalization; opt-out honored |
 | Runtime API side effects | Planned | `sdk/runtime-api-separation` | Depends on evidence model |
 | Validation and result semantics | Planned | `sdk/model-validation` | Depends on runtime API separation |
 | npm package hardening | Planned | `sdk/package-hardening` | Depends on stable contracts |
@@ -171,6 +171,9 @@ caller's mutable object. Both should be private/read-only snapshots.
 
 ### 4. Fix or remove `FindingInput.deduplicate`
 
+**Status: Complete on `sdk/evidence-model`.** Direct findings can opt out of merging, receive
+stable distinct IDs, and retain their authored summaries and recommendations.
+
 [`FindingInput`](./src/index.ts#L133) advertises `deduplicate?: boolean`, but normalization drops the
 field and [`deduplicateFindings`](./src/index.ts#L882) always merges matching IDs/group keys.
 
@@ -183,6 +186,9 @@ Recommended change: either implement the flag for direct findings or remove it f
 not only different evidence.
 
 ### 5. Choose one canonical evidence-location model
+
+**Status: Complete on `sdk/evidence-model`.** Runtime output uses nested `location` and one `data`
+payload. Legacy top-level locations and `metadata` remain accepted only as normalized `0.x` inputs.
 
 [`Evidence`](./src/index.ts#L67) permits both:
 

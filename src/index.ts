@@ -65,20 +65,28 @@ export const DEFAULT_CONFIDENCE_THRESHOLDS: ConfidenceThresholds = {
   high: 0.85,
 };
 
-export interface Evidence {
-  location?: {
-    file?: string;
-    line?: number;
-    endLine?: number;
-  };
+export interface Location {
   file?: string;
   line?: number;
   endLine?: number;
+}
+
+export interface EvidenceInput extends Location {
+  location?: Location;
   label?: string;
   message?: string;
   snippet?: string;
   data?: Record<string, unknown>;
+  /** @deprecated Use data. */
   metadata?: Record<string, unknown>;
+}
+
+export interface Evidence {
+  location?: Location;
+  label?: string;
+  message?: string;
+  snippet?: string;
+  data?: Record<string, unknown>;
 }
 
 export interface Remediation {
@@ -123,7 +131,7 @@ export interface ObservationInit {
   summary?: ObservationSummary;
   whyItMatters?: string;
   impact?: string;
-  location?: Evidence;
+  location?: EvidenceInput;
   evidence?: string | Record<string, unknown>;
   recommendation?: string | RecommendationInput;
   remediation?: Remediation;
@@ -143,7 +151,7 @@ export interface FindingInput {
   summary: string;
   whyItMatters?: string;
   impact?: string;
-  evidence: Evidence[];
+  evidence: EvidenceInput[];
   recommendation?: string;
   remediation?: Remediation;
   tags?: string[];
@@ -174,6 +182,10 @@ export interface ReviewNote {
   summary: string;
   evidence?: Evidence[];
   metadata?: Record<string, unknown>;
+}
+
+export interface ReviewNoteInput extends Omit<ReviewNote, "evidence"> {
+  evidence?: EvidenceInput[];
 }
 
 export interface ReviewAssessment {
@@ -260,8 +272,8 @@ export interface RuleContext {
   finding: (finding: FindingInput) => void;
   review: {
     assessment: (assessment: ReviewAssessment) => void;
-    positive: (note: ReviewNote) => void;
-    observe: (note: ReviewNote) => void;
+    positive: (note: ReviewNoteInput) => void;
+    observe: (note: ReviewNoteInput) => void;
     score: (score: ReviewScore) => void;
     opinion: (opinion: ReviewOpinion) => void;
   };
@@ -295,8 +307,12 @@ export interface RuleDefinition {
   defaultSeverity?: Severity;
   defaultConfidence?: ConfidenceInput;
   groupBy?: string[];
-  aggregate?: (observations: ReadonlyArray<ObservationInit>) => Partial<ReviewFinding>;
+  aggregate?: (observations: ReadonlyArray<ObservationInit>) => FindingSynthesis;
 }
+
+export type FindingSynthesis = Omit<Partial<ReviewFinding>, "evidence"> & {
+  evidence?: EvidenceInput[];
+};
 
 export class RuleRegistry {
   private readonly rules = new Map<string, RuleDefinition>();
@@ -635,8 +651,8 @@ export class TerminalRenderer implements ReviewRenderer {
 
     for (const finding of result.findings) {
       lines.push(`[${finding.severity}] ${finding.title}`);
-      const firstEvidence = finding.evidence.find((item) => item.file !== undefined);
-      if (firstEvidence?.file !== undefined) {
+      const firstEvidence = finding.evidence.find((item) => item.location?.file !== undefined);
+      if (firstEvidence?.location?.file !== undefined) {
         lines.push(formatEvidenceLocation(firstEvidence));
       }
       lines.push("");
@@ -697,20 +713,23 @@ function createRuleContext(
     },
     finding(finding: FindingInput): void {
       assertFindingInput(finding, "ctx.finding");
-      collector.findings.push(normalizeFindingInput(finding));
+      collector.findings.push({
+        finding: normalizeFindingInput(finding, collector.findings.length),
+        deduplicate: finding.deduplicate !== false,
+      });
     },
     review: {
       assessment(assessment: ReviewAssessment): void {
         assertAssessment(assessment);
         collector.assessment = assessment;
       },
-      positive(note: ReviewNote): void {
+      positive(note: ReviewNoteInput): void {
         assertReviewNote(note, "ctx.review.positive");
-        collector.positives.push(note);
+        collector.positives.push(normalizeReviewNote(note));
       },
-      observe(note: ReviewNote): void {
+      observe(note: ReviewNoteInput): void {
         assertReviewNote(note, "ctx.review.observe");
-        collector.reviewObservations.push(note);
+        collector.reviewObservations.push(normalizeReviewNote(note));
       },
       score(score: ReviewScore): void {
         assertReviewScore(score);
@@ -777,12 +796,17 @@ function globPatternToRegExp(pattern: string): RegExp {
 
 interface ReviewCollector {
   observations: ObservationInit[];
-  findings: ReviewFinding[];
+  findings: CollectedFinding[];
   assessment?: ReviewAssessment;
   positives: ReviewNote[];
   reviewObservations: ReviewNote[];
   scores: ReviewScore[];
   opinion?: ReviewOpinion;
+}
+
+interface CollectedFinding {
+  finding: ReviewFinding;
+  deduplicate: boolean;
 }
 
 function createReviewCollector(): ReviewCollector {
@@ -812,9 +836,10 @@ function buildReviewResult(input: {
     thresholds,
     input.registry,
   );
-  const allFindings = deduplicateFindings([...synthesized, ...input.collector.findings]).map(
-    (finding) => calibrateFindingSeverity(finding, input.policy),
-  );
+  const allFindings = deduplicateFindings([
+    ...synthesized.map((finding) => ({ finding, deduplicate: true })),
+    ...input.collector.findings,
+  ]).map((finding) => calibrateFindingSeverity(finding, input.policy));
   const ranked = rankFindings(allFindings);
   const minimumConfidence = input.policy.minimumConfidence ?? Confidence.Medium;
   const includeInformational = input.policy.includeInformational ?? false;
@@ -943,9 +968,15 @@ function synthesizeObservationFindings(
   });
 }
 
-function normalizeFindingInput(input: FindingInput): ReviewFinding {
+function normalizeFindingInput(input: FindingInput, occurrence = 0): ReviewFinding {
   return omitUndefined({
-    id: input.id ?? stableId(`${input.ruleId ?? input.title}:${input.groupKey ?? input.category}`),
+    id:
+      input.id ??
+      stableId(
+        `${input.ruleId ?? input.title}:${input.groupKey ?? input.category}${
+          input.deduplicate === false ? `:${occurrence}` : ""
+        }`,
+      ),
     ruleId: input.ruleId,
     groupKey: input.groupKey,
     title: input.title,
@@ -964,11 +995,16 @@ function normalizeFindingInput(input: FindingInput): ReviewFinding {
   }) as ReviewFinding;
 }
 
-function deduplicateFindings(findings: ReviewFinding[]): ReviewFinding[] {
+function deduplicateFindings(findings: CollectedFinding[]): ReviewFinding[] {
   const seen = new Set<string>();
   const result: ReviewFinding[] = [];
 
-  for (const finding of findings) {
+  for (const collected of findings) {
+    const { finding } = collected;
+    if (!collected.deduplicate) {
+      result.push({ ...finding, evidence: deduplicateEvidence(finding.evidence) });
+      continue;
+    }
     const key = finding.groupKey ?? finding.id;
     if (seen.has(key)) {
       const existing = result.find((item) => (item.groupKey ?? item.id) === key);
@@ -985,12 +1021,12 @@ function deduplicateFindings(findings: ReviewFinding[]): ReviewFinding[] {
   return result;
 }
 
-function deduplicateEvidence(evidence: Evidence[]): Evidence[] {
+function deduplicateEvidence(evidence: ReadonlyArray<EvidenceInput | Evidence>): Evidence[] {
   const seen = new Set<string>();
   const result: Evidence[] = [];
 
   for (const item of evidence) {
-    const normalized = omitUndefined(item as Record<string, unknown>) as Evidence;
+    const normalized = normalizeEvidence(item);
     const key = stableStringify(normalized);
     if (!seen.has(key)) {
       seen.add(key);
@@ -999,16 +1035,39 @@ function deduplicateEvidence(evidence: Evidence[]): Evidence[] {
   }
 
   return result.sort((left, right) => {
-    const fileComparison = compareStrings(left.file ?? "", right.file ?? "");
+    const fileComparison = compareStrings(left.location?.file ?? "", right.location?.file ?? "");
     if (fileComparison !== 0) {
       return fileComparison;
     }
-    const lineComparison = compareNumbers(left.line, right.line);
+    const lineComparison = compareNumbers(left.location?.line, right.location?.line);
     if (lineComparison !== 0) {
       return lineComparison;
     }
     return compareStrings(left.message ?? "", right.message ?? "");
   });
+}
+
+function normalizeEvidence(input: EvidenceInput | Evidence): Evidence {
+  const legacy = input as EvidenceInput;
+  const location =
+    legacy.location ??
+    (legacy.file !== undefined || legacy.line !== undefined || legacy.endLine !== undefined
+      ? omitUndefined({ file: legacy.file, line: legacy.line, endLine: legacy.endLine })
+      : undefined);
+  return omitUndefined({
+    location,
+    label: input.label,
+    message: input.message,
+    snippet: input.snippet,
+    data: input.data ?? legacy.metadata,
+  });
+}
+
+function normalizeReviewNote(note: ReviewNoteInput): ReviewNote {
+  return omitUndefined({
+    ...note,
+    evidence: note.evidence === undefined ? undefined : deduplicateEvidence(note.evidence),
+  }) as ReviewNote;
 }
 
 function deduplicateNotes(notes: ReviewNote[]): ReviewNote[] {
@@ -1191,7 +1250,7 @@ function deduplicateScores(scores: ReviewScore[]): ReviewScore[] {
 }
 
 function observationToEvidence(observation: ObservationInit): Evidence {
-  const metadata = isRecord(observation.evidence)
+  const data = isRecord(observation.evidence)
     ? observation.evidence
     : observation.evidence === undefined
       ? undefined
@@ -1205,19 +1264,11 @@ function observationToEvidence(observation: ObservationInit): Evidence {
     : observation.location?.snippet;
 
   return omitUndefined({
-    location: observation.location?.location ?? {
-      file: observation.location?.file,
-      line: observation.location?.line,
-      endLine: observation.location?.endLine,
-    },
-    file: observation.location?.file,
-    line: observation.location?.line,
-    endLine: observation.location?.endLine,
+    location: normalizeEvidence(observation.location ?? {}).location,
     label: observation.location?.label ?? message,
     message: observation.location?.message ?? message,
     snippet,
-    data: metadata,
-    metadata,
+    data,
   });
 }
 
@@ -1637,7 +1688,7 @@ function assertFindingInput(value: FindingInput, source: string): void {
   optionalStringArray(value.tags, `${source}.tags`);
 }
 
-function assertReviewNote(value: ReviewNote, source: string): void {
+function assertReviewNote(value: ReviewNoteInput, source: string): void {
   requireString(value.key, `${source}.key`);
   requireString(value.summary, `${source}.summary`);
   if (value.evidence !== undefined) {
@@ -1712,19 +1763,28 @@ function optionalObservationSummary(value: ObservationSummary | undefined, field
   optionalString(value.grouped, `${field}.grouped`);
 }
 
-function optionalEvidence(value: Evidence | undefined, field: string): void {
+function optionalEvidence(value: EvidenceInput | Evidence | undefined, field: string): void {
   if (value === undefined) {
     return;
   }
   if (!isRecord(value)) {
     throw new Error(`${field} must be an object.`);
   }
-  optionalString(value.file, `${field}.file`);
-  optionalPositiveInteger(value.line, `${field}.line`);
-  optionalPositiveInteger(value.endLine, `${field}.endLine`);
+  const input = value as EvidenceInput;
+  optionalString(input.file, `${field}.file`);
+  optionalPositiveInteger(input.line, `${field}.line`);
+  optionalPositiveInteger(input.endLine, `${field}.endLine`);
   optionalString(value.message, `${field}.message`);
   optionalString(value.snippet, `${field}.snippet`);
   optionalString(value.label, `${field}.label`);
+  if (value.location !== undefined) {
+    if (!isRecord(value.location)) {
+      throw new Error(`${field}.location must be an object.`);
+    }
+    optionalString(value.location.file, `${field}.location.file`);
+    optionalPositiveInteger(value.location.line, `${field}.location.line`);
+    optionalPositiveInteger(value.location.endLine, `${field}.location.endLine`);
+  }
 }
 
 function writeLog(level: "debug" | "info" | "warn" | "error", message: unknown): void {
@@ -1832,9 +1892,9 @@ const semanticStopWords = new Set([
 ]);
 
 function formatEvidenceLocation(evidence: Evidence): string {
-  const file = evidence.location?.file ?? evidence.file;
-  const line = evidence.location?.line ?? evidence.line;
-  const endLine = evidence.location?.endLine ?? evidence.endLine;
+  const file = evidence.location?.file;
+  const line = evidence.location?.line;
+  const endLine = evidence.location?.endLine;
 
   if (file === undefined) {
     return "";

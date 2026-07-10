@@ -33,6 +33,6 @@ describe("comment sentence adversary", () => {
       severity: "info",
       confidence: "high",
     });
-    expect(output.findings[0]?.evidence.map((item) => item.line)).toEqual([1, 4]);
+    expect(output.findings[0]?.evidence.map((item) => item.location?.line)).toEqual([1, 4]);
   });
 });

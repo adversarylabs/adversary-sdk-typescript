@@ -161,7 +161,8 @@ ctx.observe({
 });
 ```
 
-Set `deduplicate: false` only when repeated evidence is meaningful.
+Set `deduplicate: false` on a completed finding when separate findings intentionally share an
+identity. The SDK otherwise merges findings with the same group key or generated ID.
 
 ### `ctx.finding(input)`
 
@@ -177,9 +178,9 @@ ctx.finding({
   whyItMatters: "Complete-sentence comments can be useful for intent, but noisy when they restate code.",
   impact: "Reviewers may spend time reading comments that do not add much context.",
   evidence: [
-    { file: "src/index.ts", line: 3, message: "Explains parser intent." },
-    { file: "src/index.ts", line: 11, message: "Explains fallback behavior." },
-    { file: "src/index.ts", line: 20, message: "Explains output formatting." }
+    { location: { file: "src/index.ts", line: 3 }, message: "Explains parser intent." },
+    { location: { file: "src/index.ts", line: 11 }, message: "Explains fallback behavior." },
+    { location: { file: "src/index.ts", line: 20 }, message: "Explains output formatting." }
   ],
   recommendation: "Keep complete-sentence comments only when they explain non-obvious intent.",
   remediation: { complexity: "trivial" }
@@ -264,7 +265,7 @@ ctx.review.assessment({
 ctx.review.positive({
   key: "intentional-comments",
   summary: "Several comments explain intent rather than restating implementation.",
-  evidence: [{ file: "src/index.ts", line: 3 }]
+  evidence: [{ location: { file: "src/index.ts", line: 3 } }]
 });
 
 ctx.review.observe({
@@ -406,8 +407,10 @@ app.defineRule({
         "Comments are most useful when they explain non-obvious intent rather than restating code.",
       impact: "Repeated prose can make routine code harder to scan during review.",
       evidence: observations.map((observation) => ({
-        file: observation.location?.file,
-        line: observation.location?.line,
+        location: {
+          file: observation.location?.file,
+          line: observation.location?.line
+        },
         message: "complete sentence",
         snippet:
           typeof observation.evidence === "object" && observation.evidence !== null
