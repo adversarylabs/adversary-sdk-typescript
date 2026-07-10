@@ -573,6 +573,64 @@ describe("review pipeline", () => {
     expect(result.observations).toHaveLength(1);
   });
 
+  it("keeps rule definitions isolated between adversary instances", async () => {
+    const first = new Adversary({ name: "first", review: { minimumConfidence: "low" } });
+    const second = new Adversary({ name: "second", review: { minimumConfidence: "low" } });
+    const definition = (title: string) => ({
+      id: "comments.isolated",
+      category: "maintainability",
+      defaultSeverity: "low" as const,
+      defaultConfidence: "high" as const,
+      aggregate: () => ({ title, summary: `${title}.` }),
+    });
+
+    first.defineRule(definition("First definition"));
+    second.defineRule(definition("Second definition"));
+    for (const app of [first, second]) {
+      app.rule("comments", (ctx) => {
+        ctx.observe({
+          ruleId: "comments.isolated",
+          subject: "src/index.ts",
+          title: "Comment observation",
+        });
+      });
+    }
+
+    const [firstResult, secondResult] = await Promise.all(
+      [first, second].map((app) => app.run({ input: { source: { path: "/repo" } }, write: false })),
+    );
+
+    expect(firstResult.findings[0]?.title).toBe("First definition");
+    expect(secondResult.findings[0]?.title).toBe("Second definition");
+  });
+
+  it("rejects duplicate rule IDs and requires explicit replacement", async () => {
+    const app = new Adversary({ name: "comment-review", review: { minimumConfidence: "low" } });
+    const definition = (title: string) => ({
+      id: "comments.replace",
+      category: "maintainability",
+      defaultSeverity: "low" as const,
+      defaultConfidence: "high" as const,
+      aggregate: () => ({ title, summary: `${title}.` }),
+    });
+
+    app.defineRule(definition("Initial definition"));
+    expect(() => app.defineRule(definition("Duplicate definition"))).toThrow(
+      'Rule definition "comments.replace" is already registered.',
+    );
+    app.replaceRule(definition("Replacement definition"));
+    app.rule("comments", (ctx) => {
+      ctx.observe({
+        ruleId: "comments.replace",
+        subject: "src/index.ts",
+        title: "Comment observation",
+      });
+    });
+
+    const result = await app.run({ input: { source: { path: "/repo" } }, write: false });
+    expect(result.findings[0]?.title).toBe("Replacement definition");
+  });
+
   it("renders terminal and JSON output", async () => {
     const app = new Adversary({
       name: "comment-sentences",
@@ -1111,11 +1169,12 @@ describe("review pipeline", () => {
   it("uses the rule aggregate through the built package process boundary", async () => {
     const ruleId = "test.comments.complete-sentence.process";
     const script = `
-      import { Adversary, defineRule, ruleRegistry } from ${JSON.stringify(
+      import { Adversary } from ${JSON.stringify(
         new URL("../dist/index.js", import.meta.url).href,
       )};
       const ruleId = ${JSON.stringify(ruleId)};
-      defineRule({
+      const app = new Adversary({ name: "comment-review", review: { minimumConfidence: "low" } });
+      app.defineRule({
         id: ruleId,
         category: "maintainability",
         defaultSeverity: "low",
@@ -1134,7 +1193,6 @@ describe("review pipeline", () => {
           };
         },
       });
-      const app = new Adversary({ name: "comment-review", review: { minimumConfidence: "low" } });
       app.rule("comments", (ctx) => {
         for (const [line, snippet] of [[3, "// First complete sentence."], [11, "// Second complete sentence."], [20, "// Third complete sentence."]]) {
           ctx.observe({
@@ -1150,8 +1208,7 @@ describe("review pipeline", () => {
       });
       const result = await app.run({ input: { source: { path: "/repo" } }, write: false });
       console.log(JSON.stringify({
-        hasRule: ruleRegistry.has(ruleId),
-        lookupRule: ruleRegistry.lookup(ruleId)?.id,
+        hasRule: app.hasRuleDefinition(ruleId),
         finding: result.findings[0],
       }));
     `;
@@ -1166,7 +1223,6 @@ describe("review pipeline", () => {
     const parsed = JSON.parse(stdout);
 
     expect(parsed.hasRule).toBe(true);
-    expect(parsed.lookupRule).toBe(ruleId);
     expect(parsed.finding.title).toBe("Comments are complete sentences");
     expect(parsed.finding.confidence).toBe("high");
     expect(parsed.finding.summary).toBe("Three comments are complete sentences.");

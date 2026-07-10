@@ -17,13 +17,13 @@ Requires Node 22 or newer and ESM.
 ## Author an adversary
 
 ```ts
-import { Adversary, Severity, defineRule, log } from "@adversarylabs/sdk";
+import { Adversary, Severity, log } from "@adversarylabs/sdk";
 
 const app = new Adversary({
   name: "adversarylabs/comment-sentences"
 });
 
-defineRule({
+app.defineRule({
   id: "comments.complete-sentence",
   category: "code-style",
   defaultSeverity: Severity.Info,
@@ -93,14 +93,14 @@ Rule context exposes:
 - `ctx.review.observe(note)`
 - `ctx.review.opinion(opinion)`
 
-### `defineRule(definition)`
+### `app.defineRule(definition)`
 
 Registers domain-specific aggregation for a stable rule id. The SDK still owns grouping,
 deduplication, ranking, suppression, and rendering; the rule definition supplies engineering
 language for a grouped set of observations.
 
 ```ts
-defineRule({
+app.defineRule({
   id: "comments.complete-sentence",
   category: "code-style",
   defaultSeverity: "info",
@@ -125,6 +125,10 @@ defineRule({
 
 `category`, `defaultSeverity`, `defaultConfidence`, and `groupBy` act as defaults for observations
 with the same `ruleId`. If a rule has no `aggregate(...)`, the SDK uses generic synthesis.
+
+Definitions are scoped to one `Adversary`. Duplicate IDs throw; use `app.replaceRule(...)` when an
+intentional replacement is required. The top-level `defineRule(...)` API remains temporarily
+available for compatibility but is deprecated.
 
 ### `ctx.observe(input)`
 
@@ -375,7 +379,7 @@ findings:
 ```ts
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { Adversary, defineRule } from "@adversarylabs/sdk";
+import { Adversary } from "@adversarylabs/sdk";
 
 const app = new Adversary({
   name: "adversarylabs/comment-sentences",
@@ -384,7 +388,7 @@ const app = new Adversary({
   }
 });
 
-defineRule({
+app.defineRule({
   id: "comments.complete-sentence",
   category: "code-style",
   defaultSeverity: "info",

@@ -30,7 +30,7 @@ before inviting third-party adversary authors or declaring a stable v1 API.
 | --- | --- | --- | --- |
 | Wire schema mismatch | Complete | `sdk/protocol-schema-v1` | Canonical `adversary.run.v1` envelope schema; result schema is `adversary.review.v1` |
 | Docker policy in core | Complete | `sdk/domain-boundary` | Generic synthesis now uses authored summaries, recommendations, and stable note keys only |
-| Global rule registry | Planned | `sdk/instance-rule-registry` | Depends on domain boundary |
+| Global rule registry | Complete | `sdk/instance-rule-registry` | Instance registries, duplicate rejection, explicit replacement, deprecated global compatibility |
 | Evidence model and deduplication | Planned | `sdk/evidence-model` | Depends on instance registry |
 | Runtime API side effects | Planned | `sdk/runtime-api-separation` | Depends on evidence model |
 | Validation and result semantics | Planned | `sdk/model-validation` | Depends on runtime API separation |
@@ -143,6 +143,11 @@ The SDK should decide **how** a review is assembled. Rules should decide **what 
 ## Priority 1: make the public API tell the truth
 
 ### 3. Remove process-global mutable rule behavior
+
+**Status: Complete on `sdk/instance-rule-registry`.** `app.defineRule(...)` and
+`app.replaceRule(...)` own defensively copied definitions per instance, runs use a registry
+snapshot, and duplicate definition/app-rule IDs throw. The top-level registry remains only as a
+deprecated compatibility bridge and cannot overwrite definitions silently.
 
 [`defineRule`](./src/index.ts#L318) writes into a module-global registry, registration silently
 overwrites an existing ID, and all `Adversary` instances consult that global registry at run time.
