@@ -22,5 +22,11 @@ adversary.rule("basic.ran", (ctx) => {
 export default adversary;
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  await adversary.runFromEnvironment();
+  // Keep the published starter runnable with the bootstrap SDK pinned in its shrinkwrap.
+  // New projects use the explicit runtime adapter; older 0.x SDKs retain run() as that adapter.
+  if ("runFromEnvironment" in adversary) {
+    await adversary.runFromEnvironment();
+  } else {
+    await (adversary.run as unknown as () => Promise<unknown>)();
+  }
 }
