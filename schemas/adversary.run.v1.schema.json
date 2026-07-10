@@ -30,6 +30,17 @@
       "additionalProperties": false,
       "properties": {
         "location": { "$ref": "#/$defs/location" },
+        "label": { "type": "string" },
+        "message": { "type": "string" },
+        "snippet": { "type": "string" },
+        "data": { "type": "object", "additionalProperties": true }
+      }
+    },
+    "evidenceInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "location": { "$ref": "#/$defs/location" },
         "file": { "type": "string" },
         "line": { "type": "integer", "minimum": 1 },
         "endLine": { "type": "integer", "minimum": 1 },
@@ -183,7 +194,7 @@
         "summary": { "$ref": "#/$defs/observationSummary" },
         "whyItMatters": { "type": "string" },
         "impact": { "type": "string" },
-        "location": { "$ref": "#/$defs/evidence" },
+        "location": { "$ref": "#/$defs/evidenceInput" },
         "evidence": {
           "oneOf": [{ "type": "string" }, { "type": "object", "additionalProperties": true }]
         },
@@ -235,9 +246,8 @@
         "suppressed": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["observations", "findings"],
+          "required": ["findings"],
           "properties": {
-            "observations": { "type": "integer", "minimum": 0 },
             "findings": { "type": "integer", "minimum": 0 }
           }
         },

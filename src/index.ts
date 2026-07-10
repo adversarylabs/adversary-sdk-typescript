@@ -65,20 +65,28 @@ export const DEFAULT_CONFIDENCE_THRESHOLDS: ConfidenceThresholds = {
   high: 0.85,
 };
 
-export interface Evidence {
-  location?: {
-    file?: string;
-    line?: number;
-    endLine?: number;
-  };
+export interface Location {
   file?: string;
   line?: number;
   endLine?: number;
+}
+
+export interface EvidenceInput extends Location {
+  location?: Location;
   label?: string;
   message?: string;
   snippet?: string;
   data?: Record<string, unknown>;
+  /** @deprecated Use data. */
   metadata?: Record<string, unknown>;
+}
+
+export interface Evidence {
+  location?: Location;
+  label?: string;
+  message?: string;
+  snippet?: string;
+  data?: Record<string, unknown>;
 }
 
 export interface Remediation {
@@ -123,7 +131,7 @@ export interface ObservationInit {
   summary?: ObservationSummary;
   whyItMatters?: string;
   impact?: string;
-  location?: Evidence;
+  location?: EvidenceInput;
   evidence?: string | Record<string, unknown>;
   recommendation?: string | RecommendationInput;
   remediation?: Remediation;
@@ -143,7 +151,7 @@ export interface FindingInput {
   summary: string;
   whyItMatters?: string;
   impact?: string;
-  evidence: Evidence[];
+  evidence: EvidenceInput[];
   recommendation?: string;
   remediation?: Remediation;
   tags?: string[];
@@ -174,6 +182,10 @@ export interface ReviewNote {
   summary: string;
   evidence?: Evidence[];
   metadata?: Record<string, unknown>;
+}
+
+export interface ReviewNoteInput extends Omit<ReviewNote, "evidence"> {
+  evidence?: EvidenceInput[];
 }
 
 export interface ReviewAssessment {
@@ -219,7 +231,6 @@ export interface ReviewResult {
   findings: ReviewFinding[];
   opinion?: ReviewOpinion;
   suppressed: {
-    observations: number;
     findings: number;
   };
   timing?: {
@@ -246,7 +257,6 @@ export interface RuntimeInput {
 
 export interface Summary {
   files_scanned?: number;
-  [key: string]: number | string | boolean | null | undefined;
 }
 
 export interface RuleContext {
@@ -260,8 +270,8 @@ export interface RuleContext {
   finding: (finding: FindingInput) => void;
   review: {
     assessment: (assessment: ReviewAssessment) => void;
-    positive: (note: ReviewNote) => void;
-    observe: (note: ReviewNote) => void;
+    positive: (note: ReviewNoteInput) => void;
+    observe: (note: ReviewNoteInput) => void;
     score: (score: ReviewScore) => void;
     opinion: (opinion: ReviewOpinion) => void;
   };
@@ -276,13 +286,21 @@ export interface AdversaryOptions {
 }
 
 export interface RunOptions {
-  input?: RuntimeInput;
-  inputPath?: string;
-  outputPath?: string;
-  write?: boolean;
+  input: RuntimeInput;
   review?: ReviewPolicy;
   includeSuppressed?: boolean;
   includeRawObservations?: boolean;
+  includeTiming?: boolean;
+}
+
+export interface EnvironmentRunOptions {
+  input?: RuntimeInput;
+  inputPath?: string;
+  outputPath?: string;
+  review?: ReviewPolicy;
+  includeSuppressed?: boolean;
+  includeRawObservations?: boolean;
+  includeTiming?: boolean;
 }
 
 export interface ReviewRenderer {
@@ -295,30 +313,86 @@ export interface RuleDefinition {
   defaultSeverity?: Severity;
   defaultConfidence?: ConfidenceInput;
   groupBy?: string[];
-  aggregate?: (observations: ObservationInit[]) => Partial<ReviewFinding>;
+  aggregate?: (observations: ReadonlyArray<ObservationInit>) => FindingSynthesis;
 }
+
+export type FindingSynthesis = Omit<Partial<ReviewFinding>, "evidence"> & {
+  evidence?: EvidenceInput[];
+};
 
 export class RuleRegistry {
   private readonly rules = new Map<string, RuleDefinition>();
 
   register(rule: RuleDefinition): void {
     assertRuleDefinition(rule);
-    this.rules.set(rule.id, rule);
+    if (this.rules.has(rule.id)) {
+      throw new Error(`Rule definition "${rule.id}" is already registered.`);
+    }
+    this.rules.set(rule.id, cloneRuleDefinition(rule));
+  }
+
+  replace(rule: RuleDefinition): void {
+    assertRuleDefinition(rule);
+    if (!this.rules.has(rule.id)) {
+      throw new Error(`Rule definition "${rule.id}" is not registered.`);
+    }
+    this.rules.set(rule.id, cloneRuleDefinition(rule));
   }
 
   lookup(ruleId: string): RuleDefinition | undefined {
-    return this.rules.get(ruleId);
+    const rule = this.rules.get(ruleId);
+    return rule === undefined ? undefined : cloneRuleDefinition(rule);
   }
 
   has(ruleId: string): boolean {
     return this.rules.has(ruleId);
   }
+
+  snapshot(): RuleRegistry {
+    const snapshot = new RuleRegistry();
+    for (const rule of this.rules.values()) {
+      snapshot.register(rule);
+    }
+    return snapshot;
+  }
+
+  importMissing(source: RuleRegistry): void {
+    for (const rule of source.rules.values()) {
+      if (!this.rules.has(rule.id)) {
+        this.rules.set(rule.id, cloneRuleDefinition(rule));
+      }
+    }
+  }
 }
 
+function cloneRuleDefinition(rule: RuleDefinition): RuleDefinition {
+  return {
+    ...rule,
+    groupBy: rule.groupBy === undefined ? undefined : [...rule.groupBy],
+  };
+}
+
+function cloneReviewPolicy(policy: ReviewPolicy): ReviewPolicy {
+  return {
+    ...policy,
+    confidenceThresholds:
+      policy.confidenceThresholds === undefined ? undefined : { ...policy.confidenceThresholds },
+    severityOverrides:
+      policy.severityOverrides === undefined ? undefined : { ...policy.severityOverrides },
+  };
+}
+
+/** @deprecated Prefer app.defineRule(...) so definitions remain instance-scoped. */
 export const ruleRegistry = new RuleRegistry();
 
+/** @deprecated Prefer app.defineRule(...) so definitions remain instance-scoped. */
 export function defineRule(rule: RuleDefinition): void {
   ruleRegistry.register(rule);
+}
+
+/** @deprecated Prefer app.replaceRule(...) so definitions remain instance-scoped. */
+export function replaceRule(rule: RuleDefinition): void {
+  ruleRegistry.replace(rule);
 }
 
 export const log = {
@@ -346,8 +420,9 @@ export const log = {
 export class Adversary {
   readonly name: string;
   readonly version?: string;
-  readonly rules: Array<{ id: string; handler: RuleHandler }> = [];
-  readonly reviewPolicy: ReviewPolicy;
+  private readonly rules: Array<{ id: string; handler: RuleHandler }> = [];
+  private readonly reviewPolicy: ReviewPolicy;
+  private readonly ruleDefinitions: RuleRegistry;
 
   constructor(options: AdversaryOptions) {
     if (options.name.length === 0) {
@@ -356,7 +431,21 @@ export class Adversary {
 
     this.name = options.name;
     this.version = options.version;
-    this.reviewPolicy = options.review ?? {};
+    this.reviewPolicy = cloneReviewPolicy(options.review ?? {});
+    assertReviewPolicy(this.reviewPolicy, `adversary "${this.name}" review policy`);
+    this.ruleDefinitions = ruleRegistry.snapshot();
+  }
+
+  defineRule(rule: RuleDefinition): void {
+    this.ruleDefinitions.register(rule);
+  }
+
+  replaceRule(rule: RuleDefinition): void {
+    this.ruleDefinitions.replace(rule);
+  }
+
+  hasRuleDefinition(ruleId: string): boolean {
+    return this.ruleDefinitions.has(ruleId);
   }
 
   rule(id: string, handler: RuleHandler): void {
@@ -364,19 +453,26 @@ export class Adversary {
       throw new Error("Rule id must be a non-empty string.");
     }
 
+    if (this.rules.some((rule) => rule.id === id)) {
+      throw new Error(`App rule "${id}" is already registered.`);
+    }
+
+    // Compatibility for definitions registered with the deprecated top-level API after
+    // this Adversary was constructed. Once copied, later global changes cannot affect it.
+    this.ruleDefinitions.importMissing(ruleRegistry);
     this.rules.push({ id, handler });
   }
 
-  async run(options: RunOptions = {}): Promise<ReviewResult> {
+  async run(options: RunOptions): Promise<ReviewResult> {
     const startedAt = performance.now();
-    const input = options.input ?? (await parseInput(options.inputPath));
-    const repoPath = process.env.ADVERSARY_REPO ?? input.source.path;
+    assertReviewPolicy(options.review ?? {}, `adversary "${this.name}" run review policy`);
+    const repoPath = options.input.source.path;
     const summary: Summary = {};
     const cache = new Map<string, unknown>();
     const collector = createReviewCollector();
-    const context = createRuleContext(repoPath, summary, cache, collector);
-    const includeSuppressed =
-      options.includeSuppressed ?? parseBooleanEnv(process.env.ADVERSARY_INCLUDE_SUPPRESSED);
+    const registry = this.ruleDefinitions.snapshot();
+    const context = createRuleContext(repoPath, summary, cache, collector, registry);
+    const includeSuppressed = options.includeSuppressed;
 
     for (const rule of this.rules) {
       log.debug(`running rule ${rule.id}`);
@@ -388,17 +484,38 @@ export class Adversary {
       repository: repoPath,
       filesScanned: typeof summary.files_scanned === "number" ? summary.files_scanned : undefined,
       collector,
-      policy: { ...this.reviewPolicy, ...options.review },
+      policy: cloneReviewPolicy({ ...this.reviewPolicy, ...options.review }),
+      registry,
       includeSuppressed,
       includeRawObservations: options.includeRawObservations,
-      timing: { totalMs: Math.round(performance.now() - startedAt) },
+      timing: options.includeTiming
+        ? { totalMs: Math.round(performance.now() - startedAt) }
+        : undefined,
     });
 
-    if (options.write !== false) {
-      await writeOutput(createAdversaryRunEnvelope(output), options.outputPath);
-    }
-
     return output;
+  }
+
+  async runFromEnvironment(options: EnvironmentRunOptions = {}): Promise<ReviewResult> {
+    const input =
+      options.input ??
+      (await parseInput(options.inputPath ?? process.env.ADVERSARY_INPUT ?? DEFAULT_INPUT_PATH));
+    const repository = options.input
+      ? input.source.path
+      : (process.env.ADVERSARY_REPO ?? input.source.path);
+    const result = await this.run({
+      input: { ...input, source: { ...input.source, path: repository } },
+      review: options.review,
+      includeSuppressed:
+        options.includeSuppressed ?? parseBooleanEnv(process.env.ADVERSARY_INCLUDE_SUPPRESSED),
+      includeRawObservations: options.includeRawObservations,
+      includeTiming: options.includeTiming,
+    });
+    await writeOutput(
+      createAdversaryRunEnvelope(result),
+      options.outputPath ?? process.env.ADVERSARY_OUTPUT ?? DEFAULT_OUTPUT_PATH,
+    );
+    return result;
   }
 }
 
@@ -409,9 +526,7 @@ export function createAdversaryRunEnvelope(result: ReviewResult): AdversaryRunEn
   };
 }
 
-export async function parseInput(
-  path = process.env.ADVERSARY_INPUT ?? DEFAULT_INPUT_PATH,
-): Promise<RuntimeInput> {
+export async function parseInput(path = DEFAULT_INPUT_PATH): Promise<RuntimeInput> {
   const raw = await readFile(path, "utf8");
   const parsed: unknown = JSON.parse(raw);
 
@@ -430,10 +545,7 @@ export async function parseInput(
   return parsed as RuntimeInput;
 }
 
-export async function writeOutput(
-  output: unknown,
-  path = process.env.ADVERSARY_OUTPUT ?? DEFAULT_OUTPUT_PATH,
-): Promise<void> {
+export async function writeOutput(output: unknown, path = DEFAULT_OUTPUT_PATH): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, `${JSON.stringify(output, null, 2)}\n`, "utf8");
 }
@@ -560,8 +672,8 @@ export class TerminalRenderer implements ReviewRenderer {
 
     for (const finding of result.findings) {
       lines.push(`[${finding.severity}] ${finding.title}`);
-      const firstEvidence = finding.evidence.find((item) => item.file !== undefined);
-      if (firstEvidence?.file !== undefined) {
+      const firstEvidence = finding.evidence.find((item) => item.location?.file !== undefined);
+      if (firstEvidence?.location?.file !== undefined) {
         lines.push(formatEvidenceLocation(firstEvidence));
       }
       lines.push("");
@@ -599,6 +711,7 @@ function createRuleContext(
   summary: Summary,
   cache: Map<string, unknown>,
   collector: ReviewCollector,
+  registry: RuleRegistry,
 ): RuleContext {
   const absoluteRepoPath = resolve(repoPath);
 
@@ -616,25 +729,28 @@ function createRuleContext(
       return findMatchingPaths(absoluteRepoPath, pattern, true);
     },
     observe(observation: ObservationInit): void {
-      assertObservationInit(observation, "ctx.observe");
+      assertObservationInit(observation, "ctx.observe", registry);
       collector.observations.push(observation);
     },
     finding(finding: FindingInput): void {
       assertFindingInput(finding, "ctx.finding");
-      collector.findings.push(normalizeFindingInput(finding));
+      collector.findings.push({
+        finding: normalizeFindingInput(finding, collector.findings.length),
+        deduplicate: finding.deduplicate !== false,
+      });
     },
     review: {
       assessment(assessment: ReviewAssessment): void {
         assertAssessment(assessment);
         collector.assessment = assessment;
       },
-      positive(note: ReviewNote): void {
+      positive(note: ReviewNoteInput): void {
         assertReviewNote(note, "ctx.review.positive");
-        collector.positives.push(note);
+        collector.positives.push(normalizeReviewNote(note));
       },
-      observe(note: ReviewNote): void {
+      observe(note: ReviewNoteInput): void {
         assertReviewNote(note, "ctx.review.observe");
-        collector.reviewObservations.push(note);
+        collector.reviewObservations.push(normalizeReviewNote(note));
       },
       score(score: ReviewScore): void {
         assertReviewScore(score);
@@ -701,12 +817,17 @@ function globPatternToRegExp(pattern: string): RegExp {
 
 interface ReviewCollector {
   observations: ObservationInit[];
-  findings: ReviewFinding[];
+  findings: CollectedFinding[];
   assessment?: ReviewAssessment;
   positives: ReviewNote[];
   reviewObservations: ReviewNote[];
   scores: ReviewScore[];
   opinion?: ReviewOpinion;
+}
+
+interface CollectedFinding {
+  finding: ReviewFinding;
+  deduplicate: boolean;
 }
 
 function createReviewCollector(): ReviewCollector {
@@ -725,15 +846,21 @@ function buildReviewResult(input: {
   filesScanned?: number;
   collector: ReviewCollector;
   policy: ReviewPolicy;
+  registry: RuleRegistry;
   includeSuppressed?: boolean;
   includeRawObservations?: boolean;
   timing?: ReviewResult["timing"];
 }): ReviewResult {
   const thresholds = input.policy.confidenceThresholds ?? DEFAULT_CONFIDENCE_THRESHOLDS;
-  const synthesized = synthesizeObservationFindings(input.collector.observations, thresholds);
-  const allFindings = deduplicateFindings([...synthesized, ...input.collector.findings]).map(
-    (finding) => calibrateFindingSeverity(finding, input.policy),
+  const synthesized = synthesizeObservationFindings(
+    input.collector.observations,
+    thresholds,
+    input.registry,
   );
+  const allFindings = deduplicateFindings([
+    ...synthesized.map((finding) => ({ finding, deduplicate: true })),
+    ...input.collector.findings,
+  ]).map((finding) => calibrateFindingSeverity(finding, input.policy));
   const ranked = rankFindings(allFindings);
   const minimumConfidence = input.policy.minimumConfidence ?? Confidence.Medium;
   const includeInformational = input.policy.includeInformational ?? false;
@@ -775,7 +902,6 @@ function buildReviewResult(input: {
     findings: eligible,
     opinion: input.collector.opinion ?? synthesizeOpinion(eligible),
     suppressed: {
-      observations: 0,
       findings: suppressedFindings.length,
     },
     timing: input.timing,
@@ -787,12 +913,13 @@ function buildReviewResult(input: {
 function synthesizeObservationFindings(
   observations: ObservationInit[],
   thresholds: ConfidenceThresholds,
+  registry: RuleRegistry,
 ): ReviewFinding[] {
   const grouped = new Map<string, ObservationInit[]>();
   const seen = new Set<string>();
 
   for (const observation of observations) {
-    const rule = ruleRegistry.lookup(observation.ruleId);
+    const rule = registry.lookup(observation.ruleId);
     const groupKey = observation.groupKey ?? defaultObservationGroupKey(observation, rule);
     const dedupeKey = stableStringify({ groupKey, observation });
     if (observation.deduplicate !== false && seen.has(dedupeKey)) {
@@ -808,7 +935,7 @@ function synthesizeObservationFindings(
       throw new Error("Cannot synthesize finding from an empty observation group.");
     }
 
-    const rule = ruleRegistry.lookup(first.ruleId);
+    const rule = registry.lookup(first.ruleId);
     const synthesis = rule?.aggregate?.(group) ?? {};
     const synthesisSource = rule?.aggregate === undefined ? "generic" : "rule";
     log.debug(
@@ -834,7 +961,7 @@ function synthesizeObservationFindings(
       first.severityAggregation ?? "highest",
     );
 
-    return {
+    const finding: ReviewFinding = {
       id: synthesis.id ?? stableId(`${first.ruleId}:${groupKey}`),
       ruleId: synthesis.ruleId ?? first.ruleId,
       groupKey: synthesis.groupKey ?? groupKey,
@@ -858,12 +985,20 @@ function synthesizeObservationFindings(
       tags: synthesis.tags ?? uniqueStrings(group.flatMap((observation) => observation.tags ?? [])),
       metadata: synthesis.metadata ?? first.metadata,
     };
+    assertFindingInput(finding, `adversary aggregate rule "${first.ruleId}"`);
+    return finding;
   });
 }
 
-function normalizeFindingInput(input: FindingInput): ReviewFinding {
+function normalizeFindingInput(input: FindingInput, occurrence = 0): ReviewFinding {
   return omitUndefined({
-    id: input.id ?? stableId(`${input.ruleId ?? input.title}:${input.groupKey ?? input.category}`),
+    id:
+      input.id ??
+      stableId(
+        `${input.ruleId ?? input.title}:${input.groupKey ?? input.category}${
+          input.deduplicate === false ? `:${occurrence}` : ""
+        }`,
+      ),
     ruleId: input.ruleId,
     groupKey: input.groupKey,
     title: input.title,
@@ -882,11 +1017,16 @@ function normalizeFindingInput(input: FindingInput): ReviewFinding {
   }) as ReviewFinding;
 }
 
-function deduplicateFindings(findings: ReviewFinding[]): ReviewFinding[] {
+function deduplicateFindings(findings: CollectedFinding[]): ReviewFinding[] {
   const seen = new Set<string>();
   const result: ReviewFinding[] = [];
 
-  for (const finding of findings) {
+  for (const collected of findings) {
+    const { finding } = collected;
+    if (!collected.deduplicate) {
+      result.push({ ...finding, evidence: deduplicateEvidence(finding.evidence) });
+      continue;
+    }
     const key = finding.groupKey ?? finding.id;
     if (seen.has(key)) {
       const existing = result.find((item) => (item.groupKey ?? item.id) === key);
@@ -903,12 +1043,12 @@ function deduplicateFindings(findings: ReviewFinding[]): ReviewFinding[] {
   return result;
 }
 
-function deduplicateEvidence(evidence: Evidence[]): Evidence[] {
+function deduplicateEvidence(evidence: ReadonlyArray<EvidenceInput | Evidence>): Evidence[] {
   const seen = new Set<string>();
   const result: Evidence[] = [];
 
   for (const item of evidence) {
-    const normalized = omitUndefined(item as Record<string, unknown>) as Evidence;
+    const normalized = normalizeEvidence(item);
     const key = stableStringify(normalized);
     if (!seen.has(key)) {
       seen.add(key);
@@ -917,16 +1057,39 @@ function deduplicateEvidence(evidence: Evidence[]): Evidence[] {
   }
 
   return result.sort((left, right) => {
-    const fileComparison = compareStrings(left.file ?? "", right.file ?? "");
+    const fileComparison = compareStrings(left.location?.file ?? "", right.location?.file ?? "");
     if (fileComparison !== 0) {
       return fileComparison;
     }
-    const lineComparison = compareNumbers(left.line, right.line);
+    const lineComparison = compareNumbers(left.location?.line, right.location?.line);
     if (lineComparison !== 0) {
       return lineComparison;
     }
     return compareStrings(left.message ?? "", right.message ?? "");
   });
+}
+
+function normalizeEvidence(input: EvidenceInput | Evidence): Evidence {
+  const legacy = input as EvidenceInput;
+  const location =
+    legacy.location ??
+    (legacy.file !== undefined || legacy.line !== undefined || legacy.endLine !== undefined
+      ? omitUndefined({ file: legacy.file, line: legacy.line, endLine: legacy.endLine })
+      : undefined);
+  return omitUndefined({
+    location,
+    label: input.label,
+    message: input.message,
+    snippet: input.snippet,
+    data: input.data ?? legacy.metadata,
+  });
+}
+
+function normalizeReviewNote(note: ReviewNoteInput): ReviewNote {
+  return omitUndefined({
+    ...note,
+    evidence: note.evidence === undefined ? undefined : deduplicateEvidence(note.evidence),
+  }) as ReviewNote;
 }
 
 function deduplicateNotes(notes: ReviewNote[]): ReviewNote[] {
@@ -985,20 +1148,14 @@ function notesDescribeSameFact(positive: ReviewNote, observation: ReviewNote): b
 
   const positiveText = normalizeSemanticText(`${positive.key} ${positive.summary}`);
   const observationText = normalizeSemanticText(`${observation.key} ${observation.summary}`);
-  if (positiveText.length > 0 && positiveText === observationText) {
-    return true;
-  }
-
-  const positiveSignals = highSignalSemanticTokens(positiveText);
-  const observationSignals = highSignalSemanticTokens(observationText);
-  return positiveSignals.some((token) => observationSignals.includes(token));
+  return positiveText.length > 0 && positiveText === observationText;
 }
 
 function synthesizeAssessment(
   findings: ReviewFinding[],
   positives: ReviewNote[] = [],
 ): ReviewAssessment {
-  const strength = assessmentStrength(positives[0], findings);
+  const strength = assessmentStrength(positives[0]);
 
   if (findings.length === 0) {
     return {
@@ -1034,16 +1191,9 @@ function synthesizeAssessment(
   };
 }
 
-function assessmentStrength(
-  positive: ReviewNote | undefined,
-  findings: ReviewFinding[],
-): string | undefined {
+function assessmentStrength(positive: ReviewNote | undefined): string | undefined {
   if (positive === undefined) {
     return undefined;
-  }
-
-  if (findingsReferenceDockerfile(findings)) {
-    return "This is a well-structured production Dockerfile.";
   }
 
   const summary = normalizeParagraph(positive.summary);
@@ -1054,13 +1204,6 @@ function assessmentStrength(
 }
 
 function assessmentConcern(finding: ReviewFinding): string {
-  const title = findingConcern(finding);
-  const recommendation = recommendationSubject(finding.recommendation);
-  if (recommendation === "Digest pinning" || /base images?.*digest/i.test(title)) {
-    const plural = /base images\b/i.test(title);
-    return `that the base ${plural ? "images are" : "image is"} referenced by mutable tags rather than immutable digests`;
-  }
-
   const summary = normalizeParagraph(finding.summary).split(/(?<=[.!?])\s+/, 1)[0];
   return concernClause(
     lowercaseFirst(trimTrailingSentencePunctuation(summary ?? findingConcern(finding))),
@@ -1096,7 +1239,6 @@ function synthesizeOpinion(findings: ReviewFinding[]): ReviewOpinion | undefined
 
   const highestSeverity = highestFindingSeverity(findings);
   const ship = severityWeight(highestSeverity) < severityWeight(Severity.High);
-  const subject = findingsReferenceDockerfile(findings) ? "this Dockerfile" : "this";
 
   if (findings.length > 1) {
     return {
@@ -1110,18 +1252,9 @@ function synthesizeOpinion(findings: ReviewFinding[]): ReviewOpinion | undefined
   return {
     ship,
     summary: ship
-      ? `I would ship ${subject} as-is. ${improvement} is the only improvement I would recommend before production.`
+      ? `I would ship this as-is. ${improvement} is the only improvement I would recommend before production.`
       : `${improvement} is the most important improvement to address before production.`,
   };
-}
-
-function findingsReferenceDockerfile(findings: ReviewFinding[]): boolean {
-  const files = findings.flatMap((finding) =>
-    finding.evidence
-      .map((evidence) => evidence.location?.file ?? evidence.file)
-      .filter(isNonEmptyString),
-  );
-  return files.length > 0 && files.every((file) => /(?:^|\/)Dockerfile$/.test(file));
 }
 
 function deduplicateScores(scores: ReviewScore[]): ReviewScore[] {
@@ -1139,7 +1272,7 @@ function deduplicateScores(scores: ReviewScore[]): ReviewScore[] {
 }
 
 function observationToEvidence(observation: ObservationInit): Evidence {
-  const metadata = isRecord(observation.evidence)
+  const data = isRecord(observation.evidence)
     ? observation.evidence
     : observation.evidence === undefined
       ? undefined
@@ -1153,19 +1286,11 @@ function observationToEvidence(observation: ObservationInit): Evidence {
     : observation.location?.snippet;
 
   return omitUndefined({
-    location: observation.location?.location ?? {
-      file: observation.location?.file,
-      line: observation.location?.line,
-      endLine: observation.location?.endLine,
-    },
-    file: observation.location?.file,
-    line: observation.location?.line,
-    endLine: observation.location?.endLine,
+    location: normalizeEvidence(observation.location ?? {}).location,
     label: observation.location?.label ?? message,
     message: observation.location?.message ?? message,
     snippet,
-    data: metadata,
-    metadata,
+    data,
   });
 }
 
@@ -1173,11 +1298,6 @@ function structuredEvidenceMessage(evidence: Record<string, unknown>): string | 
   const explicitMessage = stringFromUnknown(evidence.message);
   if (explicitMessage !== undefined) {
     return explicitMessage;
-  }
-
-  const stage = stringFromUnknown(evidence.stage);
-  if (stage !== undefined) {
-    return `${stage} stage`;
   }
 
   const label = stringFromUnknown(evidence.label) ?? stringFromUnknown(evidence.name);
@@ -1282,7 +1402,6 @@ function renderObservationTemplate(template: string, group: ObservationInit[]): 
 function observationTemplateValues(group: ObservationInit[]): Record<string, string> {
   const first = group[0];
   const subjects = uniqueStrings(group.map((observation) => observation.subject));
-  const stages = uniqueStrings(group.map(extractStage).filter(isNonEmptyString));
   const locations = uniqueStrings(group.map(formatObservationLocation).filter(isNonEmptyString));
 
   return omitUndefined({
@@ -1291,8 +1410,6 @@ function observationTemplateValues(group: ObservationInit[]): Record<string, str
     locations: joinHumanList(locations),
     subject: first?.subject,
     subjects: joinHumanList(subjects),
-    stage: stages[0],
-    stages: joinHumanList(stages),
   });
 }
 
@@ -1303,21 +1420,6 @@ function observationValue(observation: ObservationInit, field: string): unknown 
     }, observation);
   }
   return (observation as unknown as Record<string, unknown>)[field];
-}
-
-function extractStage(observation: ObservationInit): string | undefined {
-  if (isRecord(observation.evidence)) {
-    const explicit = stringFromUnknown(observation.evidence.stage);
-    if (explicit !== undefined) {
-      return explicit;
-    }
-    const label = stringFromUnknown(observation.evidence.label);
-    if (label !== undefined) {
-      return trimTrailingWord(label, "stage");
-    }
-  }
-
-  return trimTrailingWord(observation.location?.label, "stage");
 }
 
 function formatObservationLocation(observation: ObservationInit): string | undefined {
@@ -1371,11 +1473,6 @@ function recommendationSubject(recommendation: string | undefined): string | und
   }
 
   const normalized = trimTrailingSentencePunctuation(normalizeParagraph(recommendation));
-  const pinDigest = normalized.match(/\bpin\b.*\bby digest\b/i);
-  if (pinDigest !== null) {
-    return "Digest pinning";
-  }
-
   const firstClause = normalized.split(/\s+(?:and|when|where|with)\s+/i)[0]?.trim();
   if (!isNonEmptyString(firstClause)) {
     return undefined;
@@ -1397,6 +1494,7 @@ function gerundPhrase(phrase: string): string {
 function toGerund(verb: string): string {
   const lower = verb.toLowerCase();
   const irregular: Record<string, string> = {
+    pin: "pinning",
     run: "running",
     use: "using",
   };
@@ -1408,23 +1506,6 @@ function toGerund(verb: string): string {
     return `${lower.slice(0, -1)}ing`;
   }
   return `${lower}ing`;
-}
-
-function highSignalSemanticTokens(value: string): string[] {
-  return value
-    .split(" ")
-    .map(canonicalSemanticToken)
-    .filter((word) => highSignalReviewTerms.has(word));
-}
-
-function canonicalSemanticToken(value: string): string {
-  if (value === "stages") {
-    return "stage";
-  }
-  if (value === "artifacts") {
-    return "artifact";
-  }
-  return trimTrailingWord(trimTrailingWord(value, "ing"), "ed") ?? value;
 }
 
 function normalizeSemanticText(value: string): string {
@@ -1472,13 +1553,11 @@ function calibrateFindingSeverity(finding: ReviewFinding, policy: ReviewPolicy):
 
 function scoreFinding(finding: ReviewFinding): number {
   const locationScore = Math.min(finding.evidence.length, 5) * 3;
-  const runtimeScore = finding.tags?.some((tag) => ["production", "runtime"].includes(tag)) ? 8 : 0;
   const remediationScore = finding.remediation?.complexity === "trivial" ? 3 : 0;
   return (
     severityWeight(finding.severity) * 10 +
     confidenceWeight(finding.confidence) * 12 +
     locationScore +
-    runtimeScore +
     remediationScore
   );
 }
@@ -1578,11 +1657,15 @@ function uniqueStrings(values: string[]): string[] {
   return [...new Set(values.filter(isNonEmptyString))].sort(compareStrings);
 }
 
-function assertObservationInit(value: ObservationInit, source: string): void {
+function assertObservationInit(
+  value: ObservationInit,
+  source: string,
+  registry: RuleRegistry,
+): void {
   requireString(value.ruleId, `${source}.ruleId`);
   requireString(value.subject, `${source}.subject`);
   requireObservationTitle(value.title, `${source}.title`);
-  const rule = ruleRegistry.lookup(value.ruleId);
+  const rule = registry.lookup(value.ruleId);
   if (value.category === undefined && rule?.category === undefined) {
     throw new Error(`${source}.category is required when rule.category is not defined.`);
   }
@@ -1625,9 +1708,10 @@ function assertFindingInput(value: FindingInput, source: string): void {
   optionalString(value.ruleId, `${source}.ruleId`);
   optionalString(value.groupKey, `${source}.groupKey`);
   optionalStringArray(value.tags, `${source}.tags`);
+  optionalRemediation(value.remediation, `${source}.remediation`);
 }
 
-function assertReviewNote(value: ReviewNote, source: string): void {
+function assertReviewNote(value: ReviewNoteInput, source: string): void {
   requireString(value.key, `${source}.key`);
   requireString(value.summary, `${source}.summary`);
   if (value.evidence !== undefined) {
@@ -1639,11 +1723,17 @@ function assertReviewNote(value: ReviewNote, source: string): void {
 
 function assertReviewScore(value: ReviewScore): void {
   requireString(value.key, "ctx.review.score.key");
-  if (typeof value.score !== "number" || Number.isNaN(value.score)) {
-    throw new Error("ctx.review.score.score must be a number.");
+  if (typeof value.score !== "number" || !Number.isFinite(value.score)) {
+    throw new Error("ctx.review.score.score must be a finite number.");
   }
-  if (value.max !== undefined && (typeof value.max !== "number" || Number.isNaN(value.max))) {
-    throw new Error("ctx.review.score.max must be a number.");
+  if (value.max !== undefined && (typeof value.max !== "number" || !Number.isFinite(value.max))) {
+    throw new Error("ctx.review.score.max must be a finite number.");
+  }
+  if (value.score < 0) {
+    throw new Error("ctx.review.score.score must be greater than or equal to zero.");
+  }
+  if (value.max !== undefined && (value.max <= 0 || value.score > value.max)) {
+    throw new Error("ctx.review.score.max must be positive and no smaller than score.");
   }
   optionalString(value.label, "ctx.review.score.label");
   optionalString(value.summary, "ctx.review.score.summary");
@@ -1675,6 +1765,41 @@ function assertRuleDefinition(rule: RuleDefinition): void {
   }
 }
 
+function assertReviewPolicy(policy: ReviewPolicy, source: string): void {
+  if (policy.minimumConfidence !== undefined && !isConfidence(policy.minimumConfidence)) {
+    throw new Error(`${source}.minimumConfidence must be one of low, medium, high.`);
+  }
+  if (
+    policy.maximumFindings !== undefined &&
+    (!Number.isInteger(policy.maximumFindings) || policy.maximumFindings < 0)
+  ) {
+    throw new Error(`${source}.maximumFindings must be a non-negative integer.`);
+  }
+  if (policy.confidenceThresholds !== undefined) {
+    const { medium, high } = policy.confidenceThresholds;
+    if (medium < 0 || high > 1 || medium > high) {
+      throw new Error(`${source}.confidenceThresholds must satisfy 0 <= medium <= high <= 1.`);
+    }
+  }
+  for (const [ruleId, severity] of Object.entries(policy.severityOverrides ?? {})) {
+    if (!isSeverity(severity)) {
+      throw new Error(`${source}.severityOverrides["${ruleId}"] is not a valid severity.`);
+    }
+  }
+}
+
+function optionalRemediation(value: Remediation | undefined, field: string): void {
+  if (value === undefined) return;
+  if (!isRecord(value)) throw new Error(`${field} must be an object.`);
+  if (
+    value.complexity !== undefined &&
+    (typeof value.complexity !== "string" ||
+      !["trivial", "small", "medium", "large", "architectural"].includes(value.complexity))
+  ) {
+    throw new Error(`${field}.complexity is invalid.`);
+  }
+}
+
 function requireObservationTitle(value: ObservationTitle, field: string): void {
   if (typeof value === "string") {
     requireString(value, field);
@@ -1702,19 +1827,34 @@ function optionalObservationSummary(value: ObservationSummary | undefined, field
   optionalString(value.grouped, `${field}.grouped`);
 }
 
-function optionalEvidence(value: Evidence | undefined, field: string): void {
+function optionalEvidence(value: EvidenceInput | Evidence | undefined, field: string): void {
   if (value === undefined) {
     return;
   }
   if (!isRecord(value)) {
     throw new Error(`${field} must be an object.`);
   }
-  optionalString(value.file, `${field}.file`);
-  optionalPositiveInteger(value.line, `${field}.line`);
-  optionalPositiveInteger(value.endLine, `${field}.endLine`);
+  const input = value as EvidenceInput;
+  optionalString(input.file, `${field}.file`);
+  optionalPositiveInteger(input.line, `${field}.line`);
+  optionalPositiveInteger(input.endLine, `${field}.endLine`);
   optionalString(value.message, `${field}.message`);
   optionalString(value.snippet, `${field}.snippet`);
   optionalString(value.label, `${field}.label`);
+  if (value.location !== undefined) {
+    if (!isRecord(value.location)) {
+      throw new Error(`${field}.location must be an object.`);
+    }
+    optionalString(value.location.file, `${field}.location.file`);
+    optionalPositiveInteger(value.location.line, `${field}.location.line`);
+    optionalPositiveInteger(value.location.endLine, `${field}.location.endLine`);
+  }
+  if (value.data !== undefined && !isRecord(value.data)) {
+    throw new Error(`${field}.data must be an object.`);
+  }
+  if (input.metadata !== undefined && !isRecord(input.metadata)) {
+    throw new Error(`${field}.metadata must be an object.`);
+  }
 }
 
 function writeLog(level: "debug" | "info" | "warn" | "error", message: unknown): void {
@@ -1821,19 +1961,10 @@ const semanticStopWords = new Set([
   "using",
 ]);
 
-const highSignalReviewTerms = new Set([
-  "artifact",
-  "builder",
-  "digest",
-  "multi",
-  "runtime",
-  "stage",
-]);
-
 function formatEvidenceLocation(evidence: Evidence): string {
-  const file = evidence.location?.file ?? evidence.file;
-  const line = evidence.location?.line ?? evidence.line;
-  const endLine = evidence.location?.endLine ?? evidence.endLine;
+  const file = evidence.location?.file;
+  const line = evidence.location?.line;
+  const endLine = evidence.location?.endLine;
 
   if (file === undefined) {
     return "";

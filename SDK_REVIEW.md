@@ -29,13 +29,13 @@ before inviting third-party adversary authors or declaring a stable v1 API.
 | Review item | Status | Branch/PR | Notes |
 | --- | --- | --- | --- |
 | Wire schema mismatch | Complete | `sdk/protocol-schema-v1` | Canonical `adversary.run.v1` envelope schema; result schema is `adversary.review.v1` |
-| Docker policy in core | Planned | `sdk/domain-boundary` | Depends on protocol schema |
-| Global rule registry | Planned | `sdk/instance-rule-registry` | Depends on domain boundary |
-| Evidence model and deduplication | Planned | `sdk/evidence-model` | Depends on instance registry |
-| Runtime API side effects | Planned | `sdk/runtime-api-separation` | Depends on evidence model |
-| Validation and result semantics | Planned | `sdk/model-validation` | Depends on runtime API separation |
-| npm package hardening | Planned | `sdk/package-hardening` | Depends on stable contracts |
-| Starter template and tooling | Planned | `sdk/starter-template` | Depends on package hardening |
+| Docker policy in core | Complete | `sdk/domain-boundary` | Generic synthesis now uses authored summaries, recommendations, and stable note keys only |
+| Global rule registry | Complete | `sdk/instance-rule-registry` | Instance registries, duplicate rejection, explicit replacement, deprecated global compatibility |
+| Evidence model and deduplication | Complete | `sdk/evidence-model` | Canonical nested locations and `data`; compatibility normalization; opt-out honored |
+| Runtime API side effects | Complete | `sdk/runtime-api-separation` | Pure `run({ input })`; environment parsing and output writing live in `runFromEnvironment()` |
+| Validation and result semantics | Complete | `sdk/model-validation` | Policies, aggregate results, scores, evidence, and remediation validated; timing opt-in |
+| npm package hardening | Complete | `sdk/package-hardening` | Self-building tarball, clean JS/TS consumer test, metadata, license, usable maps, Node 22/24 CI |
+| Starter template and tooling | Complete | `sdk/starter-template` | Visible SDK result, reproducible non-root container, lockfile, and vulnerability-free dev tooling |
 
 ## Bottom line
 
@@ -109,6 +109,11 @@ Do not leave two plausible contracts in the same package.
 
 ### 2. Move Docker knowledge out of the generic engine
 
+**Status: Complete on `sdk/domain-boundary`.** Dockerfile detection, digest/stage handling,
+Docker-specific opinion subjects, tag-based runtime ranking, and the fixed domain vocabulary were
+removed. Review-note deduplication now uses stable keys or exact normalized identity; domain rules
+remain responsible for their presentation language.
+
 The generic synthesis layer currently contains all of the following:
 
 - Dockerfile detection and Docker-specific assessment/opinion subjects
@@ -139,6 +144,11 @@ The SDK should decide **how** a review is assembled. Rules should decide **what 
 
 ### 3. Remove process-global mutable rule behavior
 
+**Status: Complete on `sdk/instance-rule-registry`.** `app.defineRule(...)` and
+`app.replaceRule(...)` own defensively copied definitions per instance, runs use a registry
+snapshot, and duplicate definition/app-rule IDs throw. The top-level registry remains only as a
+deprecated compatibility bridge and cannot overwrite definitions silently.
+
 [`defineRule`](./src/index.ts#L318) writes into a module-global registry, registration silently
 overwrites an existing ID, and all `Adversary` instances consult that global registry at run time.
 A rule defined for one app/test/plugin can therefore change another app's output.
@@ -161,6 +171,9 @@ caller's mutable object. Both should be private/read-only snapshots.
 
 ### 4. Fix or remove `FindingInput.deduplicate`
 
+**Status: Complete on `sdk/evidence-model`.** Direct findings can opt out of merging, receive
+stable distinct IDs, and retain their authored summaries and recommendations.
+
 [`FindingInput`](./src/index.ts#L133) advertises `deduplicate?: boolean`, but normalization drops the
 field and [`deduplicateFindings`](./src/index.ts#L882) always merges matching IDs/group keys.
 
@@ -173,6 +186,9 @@ Recommended change: either implement the flag for direct findings or remove it f
 not only different evidence.
 
 ### 5. Choose one canonical evidence-location model
+
+**Status: Complete on `sdk/evidence-model`.** Runtime output uses nested `location` and one `data`
+payload. Legacy top-level locations and `metadata` remain accepted only as normalized `0.x` inputs.
 
 [`Evidence`](./src/index.ts#L67) permits both:
 
@@ -200,6 +216,10 @@ Recommended change:
 
 ### 6. Separate the library call from the container/CLI runtime side effects
 
+**Status: Complete on `sdk/runtime-api-separation`.** Programmatic execution requires explicit
+input and has no ambient path overrides or file writes. `runFromEnvironment()` owns CLI/container
+environment parsing, envelope creation, and output writing; explicit adapter options win.
+
 [`app.run()`](./src/index.ts#L368) reads ambient environment variables, lets
 `ADVERSARY_REPO` override an explicitly supplied input path, and writes to
 `/adversary/output.json` unless callers remember `write: false`.
@@ -220,6 +240,10 @@ breaking version.
 
 ### 7. Validate the complete public model at runtime
 
+**Status: Complete on `sdk/model-validation`.** Policies are validated before execution, and final
+aggregate findings, evidence, remediation complexity, severity overrides, and score bounds are
+checked with actionable adversary/rule context.
+
 Current checks catch several useful author errors, but important values are not validated:
 
 - `ReviewPolicy.maximumFindings` and confidence-threshold ordering/ranges.
@@ -236,6 +260,10 @@ app rule ID and observation rule ID so authors can act on them.
 
 ### 8. Make result fields meaningful or remove them
 
+**Status: Complete on `sdk/model-validation`.** Summary exposes only `files_scanned`, the permanently
+zero observation suppression count is removed, and nondeterministic timing is emitted only when
+`includeTiming` is explicitly enabled.
+
 - [`ctx.summary`](./src/index.ts#L245) accepts arbitrary fields, but only `files_scanned` is copied
   into `ReviewResult`.
 - `suppressed.observations` is always `0` ([result construction](./src/index.ts#L774)), even though
@@ -251,6 +279,10 @@ is a product goal.
 ## Priority 2: finish the npm package
 
 ### 9. Make packing self-contained and test the tarball
+
+**Status: Complete on `sdk/package-hardening`.** `prepack` builds from source and the consumer smoke
+test installs the real tarball, imports JavaScript, compiles strict TypeScript, and resolves both
+schema exports.
 
 The package has no `prepack`/`prepare` script. CI happens to build immediately before publish, but a
 local `npm pack` or `npm publish` from a clean checkout can produce a package without `dist`.
@@ -278,6 +310,9 @@ actual tarball catches issues that local `dist` imports cannot.
 
 ### 10. Fix source/declaration maps
 
+**Status: Complete on `sdk/package-hardening`.** Published source and declaration maps embed their
+source text with `inlineSources`.
+
 The tarball includes `index.js.map` and `index.d.ts.map`, both pointing to `../src/index.ts`, but
 `src/` is excluded from `files` and neither map embeds `sourcesContent`. Editors and debuggers cannot
 follow those maps back to the source they name.
@@ -292,6 +327,9 @@ TypeScript describes declaration maps as a way for editors to navigate back to o
 sources; the original source must therefore be available somehow.
 
 ### 11. Add normal package metadata and the license text
+
+**Status: Complete on `sdk/package-hardening`.** The package includes the MIT license, repository,
+homepage, issue tracker, and public/provenance publish metadata.
 
 `package.json` has a good SPDX `license` value, but the repository/tarball has no `LICENSE` file and
 the package lacks `repository`, `homepage`, and `bugs` fields.
@@ -308,6 +346,9 @@ path from an error to the source repository.
 
 ### 12. Test every supported Node line
 
+**Status: Complete on `sdk/package-hardening`.** Pull requests execute the complete suite on Node
+22 and Node 24.
+
 The package declares `node >=22`, but CI only executes Node 22. Node 24 is the current LTS line as
 of this review, while Node 22 remains LTS. Test at least the minimum supported major and current LTS
 (22 and 24). Optionally test the current release line without making it blocking immediately.
@@ -315,6 +356,9 @@ of this review, while Node 22 remains LTS. Test at least the minimum supported m
 The existing `NodeNext`/ES2022 configuration is appropriate for this support policy.
 
 ### 13. Repair the bundled starter experience
+
+**Status: Complete on `sdk/starter-template`.** The starter visibly emits its demonstration result,
+ships a shrinkwrap and `.dockerignore`, uses `npm ci`, and builds a small non-root runtime stage.
 
 The basic template's only finding is informational ([template source](./templates/basic/src/index.ts#L8)),
 but default policy suppresses informational findings. Running the generated adversary normally can
@@ -332,6 +376,9 @@ Also address these template concerns:
 ## Priority 3: operational and maintainability improvements
 
 ### 14. Update vulnerable development tooling
+
+**Status: Complete on `sdk/starter-template`.** Vitest 4 replaces the vulnerable Vitest 2/Vite
+chain; the full dependency audit reports zero vulnerabilities.
 
 The package has no vulnerable production dependencies (`npm audit --omit=dev` reported zero), which
 is excellent. The full audit currently reports five development-chain advisories, including a

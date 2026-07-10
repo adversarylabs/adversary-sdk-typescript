@@ -95,7 +95,6 @@ describe("Adversary", () => {
 
     const output = await app.run({
       input: { source: { path: process.cwd() } },
-      write: false,
     });
 
     expect(output.findings.map((finding) => finding.ruleId)).toEqual(["single", "second"]);
@@ -110,7 +109,6 @@ describe("Adversary", () => {
 
     const output = await app.run({
       input: { source: { path: process.cwd() } },
-      write: false,
     });
 
     expect(output).toMatchObject({
@@ -147,7 +145,6 @@ describe("Adversary", () => {
 
     const output = await app.run({
       input: { source: { path: process.cwd() } },
-      write: false,
     });
 
     expect(output.findings.map((finding) => finding.ruleId)).toEqual(["a", "b", "c"]);
@@ -163,7 +160,7 @@ describe("Adversary", () => {
       positives: [],
       observations: [],
       findings: [],
-      suppressed: { observations: 0, findings: 0 },
+      suppressed: { findings: 0 },
     };
 
     await writeOutput(output, outputPath);
@@ -179,7 +176,7 @@ describe("Adversary", () => {
       positives: [],
       observations: [],
       findings: [],
-      suppressed: { observations: 0, findings: 0 },
+      suppressed: { findings: 0 },
     };
 
     expect(ADVERSARY_RUN_PROTOCOL_VERSION).toBe(1);
@@ -190,7 +187,7 @@ describe("Adversary", () => {
     });
   });
 
-  it("uses CLI environment defaults when app.run is called without options", async () => {
+  it("uses CLI environment defaults through the runtime adapter", async () => {
     const directory = await mkdtemp(join(tmpdir(), "adversary-sdk-env-"));
     const inputPath = join(directory, "input.json");
     const outputPath = join(directory, "output.json");
@@ -231,7 +228,7 @@ describe("Adversary", () => {
       });
     });
 
-    const result = await app.run();
+    const result = await app.runFromEnvironment();
     const written = JSON.parse(await readFile(outputPath, "utf8"));
 
     expect(result.target.repository).toBe(envRepoPath);
@@ -242,6 +239,39 @@ describe("Adversary", () => {
       protocolVersion: 1,
       result,
     });
+  });
+
+  it("keeps programmatic runs independent of environment paths", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "adversary-sdk-library-"));
+    const ambientOutput = join(directory, "ambient-output.json");
+    process.env.ADVERSARY_REPO = "/ambient-repo";
+    process.env.ADVERSARY_OUTPUT = ambientOutput;
+
+    const app = new Adversary({ name: "adversarylabs/test" });
+    app.rule("repository", (ctx) => expect(ctx.repoPath).toBe("/explicit-repo"));
+
+    const result = await app.run({ input: { source: { path: "/explicit-repo" } } });
+
+    expect(result.target.repository).toBe("/explicit-repo");
+    await expect(readFile(ambientOutput, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("validates review policies before execution", () => {
+    expect(
+      () =>
+        new Adversary({
+          name: "adversarylabs/test",
+          review: { maximumFindings: -1 },
+        }),
+    ).toThrow('adversary "adversarylabs/test" review policy.maximumFindings');
+  });
+
+  it("omits timing by default and includes it only when requested", async () => {
+    const app = new Adversary({ name: "adversarylabs/test" });
+    const input = { source: { path: "/repo" } };
+
+    expect((await app.run({ input })).timing).toBeUndefined();
+    expect((await app.run({ input, includeTiming: true })).timing?.totalMs).toBeTypeOf("number");
   });
 
   it("exposes repo helpers on rule context", async () => {
@@ -260,7 +290,6 @@ describe("Adversary", () => {
 
     await app.run({
       input: { source: { path: repoPath } },
-      write: false,
     });
   });
 });
@@ -306,7 +335,6 @@ describe("review pipeline", () => {
 
     const output = await app.run({
       input: { source: { path: "/repo" } },
-      write: false,
     });
 
     expect(output.findings).toHaveLength(1);
@@ -316,7 +344,7 @@ describe("review pipeline", () => {
       category: "code-style",
       confidence: "high",
     });
-    expect(output.findings[0]?.evidence.map((item) => item.line)).toEqual([3, 11, 20]);
+    expect(output.findings[0]?.evidence.map((item) => item.location?.line)).toEqual([3, 11, 20]);
   });
 
   it("synthesizes grouped findings from declarative observation templates", async () => {
@@ -365,7 +393,7 @@ describe("review pipeline", () => {
       }
     });
 
-    const output = await app.run({ input: { source: { path: "/repo" } }, write: false });
+    const output = await app.run({ input: { source: { path: "/repo" } } });
 
     expect(output.findings).toHaveLength(1);
     expect(output.findings[0]).toMatchObject({
@@ -429,7 +457,7 @@ describe("review pipeline", () => {
       }
     });
 
-    const output = await app.run({ input: { source: { path: "/repo" } }, write: false });
+    const output = await app.run({ input: { source: { path: "/repo" } } });
 
     expect(output.findings[0]).toMatchObject({
       title: "Aggregated observations",
@@ -458,7 +486,7 @@ describe("review pipeline", () => {
       ctx.observe(observation);
     });
 
-    const output = await app.run({ input: { source: { path: "/repo" } }, write: false });
+    const output = await app.run({ input: { source: { path: "/repo" } } });
 
     expect(output.findings).toHaveLength(1);
     expect(output.findings[0]?.groupKey).toBe("custom-group");
@@ -500,7 +528,6 @@ describe("review pipeline", () => {
 
     const output = await app.run({
       input: { source: { path: "/repo" } },
-      write: false,
       includeSuppressed: true,
     });
 
@@ -545,13 +572,90 @@ describe("review pipeline", () => {
       });
     });
 
-    const output = await app.run({ input: { source: { path: "/repo" } }, write: false });
+    const output = await app.run({ input: { source: { path: "/repo" } } });
 
     expect(output.assessment?.risk).toBe("low");
     expect(output.positives).toHaveLength(1);
     expect(output.observations).toHaveLength(1);
     expect(output.opinion?.ship).toBe(true);
     expect(output.findings[0]?.whyItMatters).toBe("Comments should add context.");
+  });
+
+  it("uses stable note keys instead of domain vocabulary to deduplicate review notes", async () => {
+    const app = new Adversary({ name: "comment-review" });
+    app.rule("comments", (ctx) => {
+      ctx.review.positive({
+        key: "comments.behavior",
+        summary: "Comments describe runtime behavior.",
+      });
+      ctx.review.observe({
+        key: "comments.intent",
+        summary: "Comments explain runtime intent.",
+      });
+    });
+
+    const result = await app.run({ input: { source: { path: "/repo" } } });
+
+    expect(result.positives).toHaveLength(1);
+    expect(result.observations).toHaveLength(1);
+  });
+
+  it("keeps rule definitions isolated between adversary instances", async () => {
+    const first = new Adversary({ name: "first", review: { minimumConfidence: "low" } });
+    const second = new Adversary({ name: "second", review: { minimumConfidence: "low" } });
+    const definition = (title: string) => ({
+      id: "comments.isolated",
+      category: "maintainability",
+      defaultSeverity: "low" as const,
+      defaultConfidence: "high" as const,
+      aggregate: () => ({ title, summary: `${title}.` }),
+    });
+
+    first.defineRule(definition("First definition"));
+    second.defineRule(definition("Second definition"));
+    for (const app of [first, second]) {
+      app.rule("comments", (ctx) => {
+        ctx.observe({
+          ruleId: "comments.isolated",
+          subject: "src/index.ts",
+          title: "Comment observation",
+        });
+      });
+    }
+
+    const [firstResult, secondResult] = await Promise.all(
+      [first, second].map((app) => app.run({ input: { source: { path: "/repo" } } })),
+    );
+
+    expect(firstResult.findings[0]?.title).toBe("First definition");
+    expect(secondResult.findings[0]?.title).toBe("Second definition");
+  });
+
+  it("rejects duplicate rule IDs and requires explicit replacement", async () => {
+    const app = new Adversary({ name: "comment-review", review: { minimumConfidence: "low" } });
+    const definition = (title: string) => ({
+      id: "comments.replace",
+      category: "maintainability",
+      defaultSeverity: "low" as const,
+      defaultConfidence: "high" as const,
+      aggregate: () => ({ title, summary: `${title}.` }),
+    });
+
+    app.defineRule(definition("Initial definition"));
+    expect(() => app.defineRule(definition("Duplicate definition"))).toThrow(
+      'Rule definition "comments.replace" is already registered.',
+    );
+    app.replaceRule(definition("Replacement definition"));
+    app.rule("comments", (ctx) => {
+      ctx.observe({
+        ruleId: "comments.replace",
+        subject: "src/index.ts",
+        title: "Comment observation",
+      });
+    });
+
+    const result = await app.run({ input: { source: { path: "/repo" } } });
+    expect(result.findings[0]?.title).toBe("Replacement definition");
   });
 
   it("renders terminal and JSON output", async () => {
@@ -577,7 +681,7 @@ describe("review pipeline", () => {
         remediation: { complexity: "trivial" },
       });
     });
-    const result = await app.run({ input: { source: { path: "/repo" } }, write: false });
+    const result = await app.run({ input: { source: { path: "/repo" } } });
     let terminal = "";
     let json = "";
 
@@ -627,7 +731,7 @@ describe("review pipeline", () => {
       });
     });
 
-    const result = await app.run({ input: { source: { path: "/repo" } }, write: false });
+    const result = await app.run({ input: { source: { path: "/repo" } } });
     let terminal = "";
 
     new TerminalRenderer((text) => {
@@ -691,7 +795,7 @@ describe("review pipeline", () => {
       }
     });
 
-    const result = await app.run({ input: { source: { path: "/repo" } }, write: false });
+    const result = await app.run({ input: { source: { path: "/repo" } } });
     let terminal = "";
 
     new TerminalRenderer((text) => {
@@ -826,7 +930,7 @@ describe("review pipeline", () => {
       });
     });
 
-    const result = await app.run({ input: { source: { path: "/repo" } }, write: false });
+    const result = await app.run({ input: { source: { path: "/repo" } } });
     const finding = result.findings[0];
 
     expect(finding).toMatchObject({
@@ -837,7 +941,7 @@ describe("review pipeline", () => {
       summary: "Three comments are complete sentences.",
       synthesisSource: "rule",
     });
-    expect(finding?.evidence.map((item) => item.line)).toEqual([3, 11, 20]);
+    expect(finding?.evidence.map((item) => item.location?.line)).toEqual([3, 11, 20]);
     expect(result.assessment?.summary).toBe(
       "The code is easy to follow. The only suggestion is to trim repetitive comments.",
     );
@@ -875,7 +979,7 @@ describe("review pipeline", () => {
       });
     });
 
-    const result = await app.run({ input: { source: { path: "/repo" } }, write: false });
+    const result = await app.run({ input: { source: { path: "/repo" } } });
 
     expect(result.assessment?.summary).toBe(
       "Comments are concentrated near the parsing flow. The only material concern identified is that the three comments are complete sentences.",
@@ -908,7 +1012,7 @@ describe("review pipeline", () => {
       });
     });
 
-    const result = await app.run({ input: { source: { path: "/repo" } }, write: false });
+    const result = await app.run({ input: { source: { path: "/repo" } } });
 
     expect(result.opinion?.summary).toMatchInlineSnapshot(
       `"I would address the remaining findings before production."`,
@@ -919,7 +1023,7 @@ describe("review pipeline", () => {
     const app = new Adversary({ name: "empty-comment-review" });
     app.rule("comments", () => {});
 
-    const result = await app.run({ input: { source: { path: "/repo" } }, write: false });
+    const result = await app.run({ input: { source: { path: "/repo" } } });
 
     expect(result.opinion?.summary).toMatchInlineSnapshot(`"I would ship this as-is."`);
   });
@@ -1006,7 +1110,7 @@ describe("review pipeline", () => {
       }
     });
 
-    const result = await app.run({ input: { source: { path: "/repo" } }, write: false });
+    const result = await app.run({ input: { source: { path: "/repo" } } });
     let terminal = "";
     new TerminalRenderer((text) => {
       terminal += text;
@@ -1092,11 +1196,12 @@ describe("review pipeline", () => {
   it("uses the rule aggregate through the built package process boundary", async () => {
     const ruleId = "test.comments.complete-sentence.process";
     const script = `
-      import { Adversary, defineRule, ruleRegistry } from ${JSON.stringify(
+      import { Adversary } from ${JSON.stringify(
         new URL("../dist/index.js", import.meta.url).href,
       )};
       const ruleId = ${JSON.stringify(ruleId)};
-      defineRule({
+      const app = new Adversary({ name: "comment-review", review: { minimumConfidence: "low" } });
+      app.defineRule({
         id: ruleId,
         category: "maintainability",
         defaultSeverity: "low",
@@ -1115,7 +1220,6 @@ describe("review pipeline", () => {
           };
         },
       });
-      const app = new Adversary({ name: "comment-review", review: { minimumConfidence: "low" } });
       app.rule("comments", (ctx) => {
         for (const [line, snippet] of [[3, "// First complete sentence."], [11, "// Second complete sentence."], [20, "// Third complete sentence."]]) {
           ctx.observe({
@@ -1129,10 +1233,9 @@ describe("review pipeline", () => {
           });
         }
       });
-      const result = await app.run({ input: { source: { path: "/repo" } }, write: false });
+      const result = await app.run({ input: { source: { path: "/repo" } } });
       console.log(JSON.stringify({
-        hasRule: ruleRegistry.has(ruleId),
-        lookupRule: ruleRegistry.lookup(ruleId)?.id,
+        hasRule: app.hasRuleDefinition(ruleId),
         finding: result.findings[0],
       }));
     `;
@@ -1147,7 +1250,6 @@ describe("review pipeline", () => {
     const parsed = JSON.parse(stdout);
 
     expect(parsed.hasRule).toBe(true);
-    expect(parsed.lookupRule).toBe(ruleId);
     expect(parsed.finding.title).toBe("Comments are complete sentences");
     expect(parsed.finding.confidence).toBe("high");
     expect(parsed.finding.summary).toBe("Three comments are complete sentences.");
@@ -1178,6 +1280,55 @@ describe("review pipeline", () => {
     ]);
 
     expect(ranked[0]?.id).toBe("useful");
+  });
+
+  it("preserves distinct direct findings when deduplication is disabled", async () => {
+    const app = new Adversary({ name: "adversarylabs/test" });
+    app.rule("direct-findings", (ctx) => {
+      for (const [summary, recommendation, line] of [
+        ["First explanation.", "Make the first change.", 1],
+        ["Second explanation.", "Make the second change.", 2],
+      ] as const) {
+        ctx.finding({
+          title: "Repeated title",
+          category: "quality",
+          severity: "low",
+          confidence: "high",
+          summary,
+          recommendation,
+          evidence: [{ file: "src/index.ts", line }],
+          deduplicate: false,
+        });
+      }
+    });
+
+    const result = await app.run({ input: { source: { path: process.cwd() } } });
+
+    expect(result.findings.map(({ summary }) => summary)).toEqual([
+      "First explanation.",
+      "Second explanation.",
+    ]);
+    expect(new Set(result.findings.map(({ id }) => id)).size).toBe(2);
+  });
+
+  it("normalizes legacy evidence into one canonical output shape", async () => {
+    const app = new Adversary({ name: "adversarylabs/test" });
+    app.rule("legacy-evidence", (ctx) => {
+      ctx.finding({
+        title: "Legacy evidence",
+        category: "quality",
+        severity: "low",
+        confidence: "high",
+        summary: "Legacy evidence is accepted at the collection boundary.",
+        evidence: [{ file: "src/index.ts", line: 3, metadata: { parser: "comments" } }],
+      });
+    });
+
+    const result = await app.run({ input: { source: { path: process.cwd() } } });
+
+    expect(result.findings[0]?.evidence).toEqual([
+      { location: { file: "src/index.ts", line: 3 }, data: { parser: "comments" } },
+    ]);
   });
 });
 

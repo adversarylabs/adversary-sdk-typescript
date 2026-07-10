@@ -17,13 +17,13 @@ Requires Node 22 or newer and ESM.
 ## Author an adversary
 
 ```ts
-import { Adversary, Severity, defineRule, log } from "@adversarylabs/sdk";
+import { Adversary, Severity, log } from "@adversarylabs/sdk";
 
 const app = new Adversary({
   name: "adversarylabs/comment-sentences"
 });
 
-defineRule({
+app.defineRule({
   id: "comments.complete-sentence",
   category: "code-style",
   defaultSeverity: Severity.Info,
@@ -59,7 +59,7 @@ app.rule("comments.complete-sentence", async (ctx) => {
   });
 });
 
-await app.run();
+await app.runFromEnvironment();
 ```
 
 ## API
@@ -93,14 +93,14 @@ Rule context exposes:
 - `ctx.review.observe(note)`
 - `ctx.review.opinion(opinion)`
 
-### `defineRule(definition)`
+### `app.defineRule(definition)`
 
 Registers domain-specific aggregation for a stable rule id. The SDK still owns grouping,
 deduplication, ranking, suppression, and rendering; the rule definition supplies engineering
 language for a grouped set of observations.
 
 ```ts
-defineRule({
+app.defineRule({
   id: "comments.complete-sentence",
   category: "code-style",
   defaultSeverity: "info",
@@ -125,6 +125,10 @@ defineRule({
 
 `category`, `defaultSeverity`, `defaultConfidence`, and `groupBy` act as defaults for observations
 with the same `ruleId`. If a rule has no `aggregate(...)`, the SDK uses generic synthesis.
+
+Definitions are scoped to one `Adversary`. Duplicate IDs throw; use `app.replaceRule(...)` when an
+intentional replacement is required. The top-level `defineRule(...)` API remains temporarily
+available for compatibility but is deprecated.
 
 ### `ctx.observe(input)`
 
@@ -157,7 +161,8 @@ ctx.observe({
 });
 ```
 
-Set `deduplicate: false` only when repeated evidence is meaningful.
+Set `deduplicate: false` on a completed finding when separate findings intentionally share an
+identity. The SDK otherwise merges findings with the same group key or generated ID.
 
 ### `ctx.finding(input)`
 
@@ -173,9 +178,9 @@ ctx.finding({
   whyItMatters: "Complete-sentence comments can be useful for intent, but noisy when they restate code.",
   impact: "Reviewers may spend time reading comments that do not add much context.",
   evidence: [
-    { file: "src/index.ts", line: 3, message: "Explains parser intent." },
-    { file: "src/index.ts", line: 11, message: "Explains fallback behavior." },
-    { file: "src/index.ts", line: 20, message: "Explains output formatting." }
+    { location: { file: "src/index.ts", line: 3 }, message: "Explains parser intent." },
+    { location: { file: "src/index.ts", line: 11 }, message: "Explains fallback behavior." },
+    { location: { file: "src/index.ts", line: 20 }, message: "Explains output formatting." }
   ],
   recommendation: "Keep complete-sentence comments only when they explain non-obvious intent.",
   remediation: { complexity: "trivial" }
@@ -260,7 +265,7 @@ ctx.review.assessment({
 ctx.review.positive({
   key: "intentional-comments",
   summary: "Several comments explain intent rather than restating implementation.",
-  evidence: [{ file: "src/index.ts", line: 3 }]
+  evidence: [{ location: { file: "src/index.ts", line: 3 } }]
 });
 
 ctx.review.observe({
@@ -309,7 +314,9 @@ Use `ctx.finding(...)` when the adversary has already done issue synthesis itsel
 
 ## Review Result
 
-`app.run()` returns one normalized review object:
+`app.run({ input })` is the side-effect-free library API and returns one normalized review object.
+Container and CLI entry points should call `app.runFromEnvironment()`, which reads the runtime
+environment and writes the run envelope to the configured output path.
 
 ```ts
 type ReviewResult = {
@@ -321,7 +328,7 @@ type ReviewResult = {
   scores?: ReviewScore[];
   findings: ReviewFinding[];
   opinion?: { ship?: boolean; summary: string };
-  suppressed: { observations: number; findings: number };
+  suppressed: { findings: number };
   timing?: { totalMs?: number };
 };
 ```
@@ -329,7 +336,7 @@ type ReviewResult = {
 Renderers consume this result. The SDK includes `TerminalRenderer` and `JsonRenderer`:
 
 ```ts
-const result = await app.run({ write: false });
+const result = await app.run({ });
 new TerminalRenderer().render(result);
 new JsonRenderer().render(result);
 ```
@@ -375,7 +382,7 @@ findings:
 ```ts
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { Adversary, defineRule } from "@adversarylabs/sdk";
+import { Adversary } from "@adversarylabs/sdk";
 
 const app = new Adversary({
   name: "adversarylabs/comment-sentences",
@@ -384,7 +391,7 @@ const app = new Adversary({
   }
 });
 
-defineRule({
+app.defineRule({
   id: "comments.complete-sentence",
   category: "code-style",
   defaultSeverity: "info",
@@ -402,8 +409,10 @@ defineRule({
         "Comments are most useful when they explain non-obvious intent rather than restating code.",
       impact: "Repeated prose can make routine code harder to scan during review.",
       evidence: observations.map((observation) => ({
-        file: observation.location?.file,
-        line: observation.location?.line,
+        location: {
+          file: observation.location?.file,
+          line: observation.location?.line
+        },
         message: "complete sentence",
         snippet:
           typeof observation.evidence === "object" && observation.evidence !== null
@@ -515,7 +524,6 @@ Output shape:
     "observations": [],
     "findings": [],
     "suppressed": {
-      "observations": 0,
       "findings": 0
     }
   }

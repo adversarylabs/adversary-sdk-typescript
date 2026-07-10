@@ -3,6 +3,7 @@ import { Adversary, Severity } from "@adversarylabs/sdk";
 
 const adversary = new Adversary({
   name: "adversarylabs/basic",
+  review: { includeInformational: true },
 });
 
 adversary.rule("basic.ran", (ctx) => {
@@ -21,5 +22,5 @@ adversary.rule("basic.ran", (ctx) => {
 export default adversary;
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  await adversary.run();
+  await adversary.runFromEnvironment();
 }
