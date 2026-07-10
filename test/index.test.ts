@@ -316,7 +316,7 @@ describe("review pipeline", () => {
       category: "code-style",
       confidence: "high",
     });
-    expect(output.findings[0]?.evidence.map((item) => item.line)).toEqual([3, 11, 20]);
+    expect(output.findings[0]?.evidence.map((item) => item.location?.line)).toEqual([3, 11, 20]);
   });
 
   it("synthesizes grouped findings from declarative observation templates", async () => {
@@ -914,7 +914,7 @@ describe("review pipeline", () => {
       summary: "Three comments are complete sentences.",
       synthesisSource: "rule",
     });
-    expect(finding?.evidence.map((item) => item.line)).toEqual([3, 11, 20]);
+    expect(finding?.evidence.map((item) => item.location?.line)).toEqual([3, 11, 20]);
     expect(result.assessment?.summary).toBe(
       "The code is easy to follow. The only suggestion is to trim repetitive comments.",
     );
@@ -1253,6 +1253,55 @@ describe("review pipeline", () => {
     ]);
 
     expect(ranked[0]?.id).toBe("useful");
+  });
+
+  it("preserves distinct direct findings when deduplication is disabled", async () => {
+    const app = new Adversary({ name: "adversarylabs/test" });
+    app.rule("direct-findings", (ctx) => {
+      for (const [summary, recommendation, line] of [
+        ["First explanation.", "Make the first change.", 1],
+        ["Second explanation.", "Make the second change.", 2],
+      ] as const) {
+        ctx.finding({
+          title: "Repeated title",
+          category: "quality",
+          severity: "low",
+          confidence: "high",
+          summary,
+          recommendation,
+          evidence: [{ file: "src/index.ts", line }],
+          deduplicate: false,
+        });
+      }
+    });
+
+    const result = await app.run({ input: { source: { path: process.cwd() } }, write: false });
+
+    expect(result.findings.map(({ summary }) => summary)).toEqual([
+      "First explanation.",
+      "Second explanation.",
+    ]);
+    expect(new Set(result.findings.map(({ id }) => id)).size).toBe(2);
+  });
+
+  it("normalizes legacy evidence into one canonical output shape", async () => {
+    const app = new Adversary({ name: "adversarylabs/test" });
+    app.rule("legacy-evidence", (ctx) => {
+      ctx.finding({
+        title: "Legacy evidence",
+        category: "quality",
+        severity: "low",
+        confidence: "high",
+        summary: "Legacy evidence is accepted at the collection boundary.",
+        evidence: [{ file: "src/index.ts", line: 3, metadata: { parser: "comments" } }],
+      });
+    });
+
+    const result = await app.run({ input: { source: { path: process.cwd() } }, write: false });
+
+    expect(result.findings[0]?.evidence).toEqual([
+      { location: { file: "src/index.ts", line: 3 }, data: { parser: "comments" } },
+    ]);
   });
 });
 
