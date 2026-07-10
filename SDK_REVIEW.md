@@ -33,7 +33,7 @@ before inviting third-party adversary authors or declaring a stable v1 API.
 | Global rule registry | Complete | `sdk/instance-rule-registry` | Instance registries, duplicate rejection, explicit replacement, deprecated global compatibility |
 | Evidence model and deduplication | Complete | `sdk/evidence-model` | Canonical nested locations and `data`; compatibility normalization; opt-out honored |
 | Runtime API side effects | Complete | `sdk/runtime-api-separation` | Pure `run({ input })`; environment parsing and output writing live in `runFromEnvironment()` |
-| Validation and result semantics | Planned | `sdk/model-validation` | Depends on runtime API separation |
+| Validation and result semantics | Complete | `sdk/model-validation` | Policies, aggregate results, scores, evidence, and remediation validated; timing opt-in |
 | npm package hardening | Planned | `sdk/package-hardening` | Depends on stable contracts |
 | Starter template and tooling | Planned | `sdk/starter-template` | Depends on package hardening |
 
@@ -240,6 +240,10 @@ breaking version.
 
 ### 7. Validate the complete public model at runtime
 
+**Status: Complete on `sdk/model-validation`.** Policies are validated before execution, and final
+aggregate findings, evidence, remediation complexity, severity overrides, and score bounds are
+checked with actionable adversary/rule context.
+
 Current checks catch several useful author errors, but important values are not validated:
 
 - `ReviewPolicy.maximumFindings` and confidence-threshold ordering/ranges.
@@ -255,6 +259,10 @@ wire object. Validate once after aggregation and before ranking/output. Errors s
 app rule ID and observation rule ID so authors can act on them.
 
 ### 8. Make result fields meaningful or remove them
+
+**Status: Complete on `sdk/model-validation`.** Summary exposes only `files_scanned`, the permanently
+zero observation suppression count is removed, and nondeterministic timing is emitted only when
+`includeTiming` is explicitly enabled.
 
 - [`ctx.summary`](./src/index.ts#L245) accepts arbitrary fields, but only `files_scanned` is copied
   into `ReviewResult`.

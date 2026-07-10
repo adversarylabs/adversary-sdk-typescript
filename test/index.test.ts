@@ -160,7 +160,7 @@ describe("Adversary", () => {
       positives: [],
       observations: [],
       findings: [],
-      suppressed: { observations: 0, findings: 0 },
+      suppressed: { findings: 0 },
     };
 
     await writeOutput(output, outputPath);
@@ -176,7 +176,7 @@ describe("Adversary", () => {
       positives: [],
       observations: [],
       findings: [],
-      suppressed: { observations: 0, findings: 0 },
+      suppressed: { findings: 0 },
     };
 
     expect(ADVERSARY_RUN_PROTOCOL_VERSION).toBe(1);
@@ -254,6 +254,24 @@ describe("Adversary", () => {
 
     expect(result.target.repository).toBe("/explicit-repo");
     await expect(readFile(ambientOutput, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("validates review policies before execution", () => {
+    expect(
+      () =>
+        new Adversary({
+          name: "adversarylabs/test",
+          review: { maximumFindings: -1 },
+        }),
+    ).toThrow('adversary "adversarylabs/test" review policy.maximumFindings');
+  });
+
+  it("omits timing by default and includes it only when requested", async () => {
+    const app = new Adversary({ name: "adversarylabs/test" });
+    const input = { source: { path: "/repo" } };
+
+    expect((await app.run({ input })).timing).toBeUndefined();
+    expect((await app.run({ input, includeTiming: true })).timing?.totalMs).toBeTypeOf("number");
   });
 
   it("exposes repo helpers on rule context", async () => {
