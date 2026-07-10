@@ -34,7 +34,7 @@ before inviting third-party adversary authors or declaring a stable v1 API.
 | Evidence model and deduplication | Complete | `sdk/evidence-model` | Canonical nested locations and `data`; compatibility normalization; opt-out honored |
 | Runtime API side effects | Complete | `sdk/runtime-api-separation` | Pure `run({ input })`; environment parsing and output writing live in `runFromEnvironment()` |
 | Validation and result semantics | Complete | `sdk/model-validation` | Policies, aggregate results, scores, evidence, and remediation validated; timing opt-in |
-| npm package hardening | Planned | `sdk/package-hardening` | Depends on stable contracts |
+| npm package hardening | Complete | `sdk/package-hardening` | Self-building tarball, clean JS/TS consumer test, metadata, license, usable maps, Node 22/24 CI |
 | Starter template and tooling | Planned | `sdk/starter-template` | Depends on package hardening |
 
 ## Bottom line
@@ -280,6 +280,10 @@ is a product goal.
 
 ### 9. Make packing self-contained and test the tarball
 
+**Status: Complete on `sdk/package-hardening`.** `prepack` builds from source and the consumer smoke
+test installs the real tarball, imports JavaScript, compiles strict TypeScript, and resolves both
+schema exports.
+
 The package has no `prepack`/`prepare` script. CI happens to build immediately before publish, but a
 local `npm pack` or `npm publish` from a clean checkout can produce a package without `dist`.
 
@@ -306,6 +310,9 @@ actual tarball catches issues that local `dist` imports cannot.
 
 ### 10. Fix source/declaration maps
 
+**Status: Complete on `sdk/package-hardening`.** Published source and declaration maps embed their
+source text with `inlineSources`.
+
 The tarball includes `index.js.map` and `index.d.ts.map`, both pointing to `../src/index.ts`, but
 `src/` is excluded from `files` and neither map embeds `sourcesContent`. Editors and debuggers cannot
 follow those maps back to the source they name.
@@ -320,6 +327,9 @@ TypeScript describes declaration maps as a way for editors to navigate back to o
 sources; the original source must therefore be available somehow.
 
 ### 11. Add normal package metadata and the license text
+
+**Status: Complete on `sdk/package-hardening`.** The package includes the MIT license, repository,
+homepage, issue tracker, and public/provenance publish metadata.
 
 `package.json` has a good SPDX `license` value, but the repository/tarball has no `LICENSE` file and
 the package lacks `repository`, `homepage`, and `bugs` fields.
