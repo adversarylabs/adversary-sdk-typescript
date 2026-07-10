@@ -3,6 +3,7 @@ import { Adversary, Severity } from "@adversarylabs/sdk";
 
 const adversary = new Adversary({
   name: "adversarylabs/basic",
+  review: { includeInformational: true },
 });
 
 adversary.rule("basic.ran", (ctx) => {
