@@ -32,7 +32,7 @@ before inviting third-party adversary authors or declaring a stable v1 API.
 | Docker policy in core | Complete | `sdk/domain-boundary` | Generic synthesis now uses authored summaries, recommendations, and stable note keys only |
 | Global rule registry | Complete | `sdk/instance-rule-registry` | Instance registries, duplicate rejection, explicit replacement, deprecated global compatibility |
 | Evidence model and deduplication | Complete | `sdk/evidence-model` | Canonical nested locations and `data`; compatibility normalization; opt-out honored |
-| Runtime API side effects | Planned | `sdk/runtime-api-separation` | Depends on evidence model |
+| Runtime API side effects | Complete | `sdk/runtime-api-separation` | Pure `run({ input })`; environment parsing and output writing live in `runFromEnvironment()` |
 | Validation and result semantics | Planned | `sdk/model-validation` | Depends on runtime API separation |
 | npm package hardening | Planned | `sdk/package-hardening` | Depends on stable contracts |
 | Starter template and tooling | Planned | `sdk/starter-template` | Depends on package hardening |
@@ -215,6 +215,10 @@ Recommended change:
 - Provide a compatibility normalizer for old input during the `0.x` period if needed.
 
 ### 6. Separate the library call from the container/CLI runtime side effects
+
+**Status: Complete on `sdk/runtime-api-separation`.** Programmatic execution requires explicit
+input and has no ambient path overrides or file writes. `runFromEnvironment()` owns CLI/container
+environment parsing, envelope creation, and output writing; explicit adapter options win.
 
 [`app.run()`](./src/index.ts#L368) reads ambient environment variables, lets
 `ADVERSARY_REPO` override an explicitly supplied input path, and writes to

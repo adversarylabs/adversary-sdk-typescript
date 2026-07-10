@@ -61,7 +61,6 @@ describe("published run protocol", () => {
 
     const result = await app.run({
       input: { source: { path: repositoryRoot } },
-      write: false,
     });
     const envelope = createAdversaryRunEnvelope(result);
     const validate = new Ajv2020({ allErrors: true }).compile(schema);

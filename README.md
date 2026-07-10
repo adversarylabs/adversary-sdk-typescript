@@ -59,7 +59,7 @@ app.rule("comments.complete-sentence", async (ctx) => {
   });
 });
 
-await app.run();
+await app.runFromEnvironment();
 ```
 
 ## API
@@ -314,7 +314,9 @@ Use `ctx.finding(...)` when the adversary has already done issue synthesis itsel
 
 ## Review Result
 
-`app.run()` returns one normalized review object:
+`app.run({ input })` is the side-effect-free library API and returns one normalized review object.
+Container and CLI entry points should call `app.runFromEnvironment()`, which reads the runtime
+environment and writes the run envelope to the configured output path.
 
 ```ts
 type ReviewResult = {
@@ -334,7 +336,7 @@ type ReviewResult = {
 Renderers consume this result. The SDK includes `TerminalRenderer` and `JsonRenderer`:
 
 ```ts
-const result = await app.run({ write: false });
+const result = await app.run({ });
 new TerminalRenderer().render(result);
 new JsonRenderer().render(result);
 ```

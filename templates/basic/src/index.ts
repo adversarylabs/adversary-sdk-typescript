@@ -21,5 +21,5 @@ adversary.rule("basic.ran", (ctx) => {
 export default adversary;
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  await adversary.run();
+  await adversary.runFromEnvironment();
 }

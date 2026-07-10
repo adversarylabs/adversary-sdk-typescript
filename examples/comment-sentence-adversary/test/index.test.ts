@@ -24,7 +24,6 @@ describe("comment sentence adversary", () => {
           path: workspace,
         },
       },
-      write: false,
     });
 
     expect(output.findings).toHaveLength(1);
