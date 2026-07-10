@@ -367,7 +367,7 @@ permissions:
   env: []
 
 findings:
-  format: adversary.findings.v1
+  format: adversary.run.v1
 ```
 
 `src/index.ts`:
@@ -503,6 +503,7 @@ Output shape:
 {
   "protocolVersion": 1,
   "result": {
+    "schemaVersion": "adversary.review.v1",
     "adversary": {
       "name": "adversarylabs/example"
     },

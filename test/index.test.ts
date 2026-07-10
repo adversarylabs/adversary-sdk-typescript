@@ -9,6 +9,7 @@ import {
   Adversary,
   Confidence,
   JsonRenderer,
+  REVIEW_RESULT_SCHEMA_VERSION,
   Severity,
   TerminalRenderer,
   createAdversaryRunEnvelope,
@@ -156,6 +157,7 @@ describe("Adversary", () => {
     const directory = await mkdtemp(join(tmpdir(), "adversary-sdk-"));
     const outputPath = join(directory, "output.json");
     const output = {
+      schemaVersion: REVIEW_RESULT_SCHEMA_VERSION,
       adversary: { name: "adversarylabs/test" },
       target: { filesScanned: 1 },
       positives: [],
@@ -171,6 +173,7 @@ describe("Adversary", () => {
 
   it("creates protocol v1 run envelopes for runtime output", async () => {
     const result = {
+      schemaVersion: REVIEW_RESULT_SCHEMA_VERSION,
       adversary: { name: "adversarylabs/test" },
       target: { repository: "/repo" },
       positives: [],
@@ -180,6 +183,7 @@ describe("Adversary", () => {
     };
 
     expect(ADVERSARY_RUN_PROTOCOL_VERSION).toBe(1);
+    expect(REVIEW_RESULT_SCHEMA_VERSION).toBe("adversary.review.v1");
     expect(createAdversaryRunEnvelope(result)).toEqual({
       protocolVersion: 1,
       result,

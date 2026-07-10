@@ -4,6 +4,7 @@ import { dirname, isAbsolute, relative, resolve } from "node:path";
 export const DEFAULT_INPUT_PATH = "/adversary/input.json";
 export const DEFAULT_OUTPUT_PATH = "/adversary/output.json";
 export const ADVERSARY_RUN_PROTOCOL_VERSION = 1;
+export const REVIEW_RESULT_SCHEMA_VERSION = "adversary.review.v1";
 
 const verboseValues = new Set(["1", "true", "TRUE", "yes", "YES"]);
 
@@ -202,6 +203,7 @@ export interface ReviewPolicy {
 }
 
 export interface ReviewResult {
+  schemaVersion: typeof REVIEW_RESULT_SCHEMA_VERSION;
   adversary: {
     name: string;
     version?: string;
@@ -759,6 +761,7 @@ function buildReviewResult(input: {
   );
 
   return omitUndefined({
+    schemaVersion: REVIEW_RESULT_SCHEMA_VERSION,
     adversary: input.adversary,
     target: omitUndefined({
       repository: input.repository,
