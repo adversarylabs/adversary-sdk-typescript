@@ -24,4 +24,4 @@ permissions:
   env: []
 
 findings:
-  format: adversary.findings.v1
+  format: adversary.run.v1
