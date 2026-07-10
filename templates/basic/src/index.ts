@@ -1,16 +1,19 @@
 import { pathToFileURL } from "node:url";
-import { Adversary, Finding, Severity } from "@adversary/sdk";
+import { Adversary, Severity } from "@adversary/sdk";
 
 const adversary = new Adversary({
   name: "adversarylabs/basic",
-  schemaVersion: "adversary.findings.v1",
 });
 
-adversary.rule("basic.ran", () => {
-  return new Finding({
+adversary.rule("basic.ran", (ctx) => {
+  ctx.finding({
     ruleId: "basic.ran",
+    category: "example",
     severity: Severity.Info,
+    confidence: "high",
     title: "Basic adversary ran successfully",
+    summary: "The template adversary executed successfully.",
+    evidence: [{ message: "Template rule completed." }],
     recommendation: "Replace this finding with checks for your own adversary.",
   });
 });

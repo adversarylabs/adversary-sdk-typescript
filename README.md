@@ -2,9 +2,9 @@
 
 Small TypeScript SDK for building file-based Adversaries.
 
-The SDK owns the runtime boilerplate: read `/adversary/input.json`, discover the source
-repository path, execute registered rules, collect observations and findings, normalize and rank
-the review, and write `/adversary/output.json`.
+The SDK owns the runtime boilerplate: read runtime input, discover the source repository path,
+execute registered rules, collect observations, synthesize findings, normalize and rank the review,
+and write runtime output.
 
 ## Install
 
@@ -17,29 +17,45 @@ Requires Node 22 or newer and ESM.
 ## Author an adversary
 
 ```ts
-import { Adversary, Severity, log } from "@adversary/sdk";
+import { Adversary, Severity, defineRule, log } from "@adversary/sdk";
 
 const app = new Adversary({
-  name: "adversarylabs/dockerfile",
-  schemaVersion: "adversary.findings.v1"
+  name: "adversarylabs/comment-sentences"
 });
 
-app.rule("docker.user.root", async (ctx) => {
+defineRule({
+  id: "comments.complete-sentence",
+  category: "code-style",
+  defaultSeverity: Severity.Info,
+  groupBy: ["ruleId", "subject"],
+  aggregate(observations) {
+    return {
+      title:
+        observations.length === 1
+          ? "Comment is a complete sentence"
+          : "Comments contain complete sentences",
+      confidence: "high",
+      summary: `${observations.length} comments are written as complete sentences.`,
+      recommendation:
+        "Keep complete-sentence comments only when they explain non-obvious intent."
+    };
+  }
+});
+
+app.rule("comments.complete-sentence", async (ctx) => {
   log.debug(`scanning ${ctx.repoPath}`);
 
   ctx.observe({
-    ruleId: "docker.user.root",
-    subject: "Dockerfile.root",
-    category: "container-hardening",
-    severity: Severity.Medium,
+    ruleId: "comments.complete-sentence",
+    subject: "src/index.ts",
     confidence: "high",
-    title: "Container runs as root",
+    title: "Comment is a complete sentence",
     location: {
-      file: "Dockerfile.root",
+      file: "src/index.ts",
       line: 2
     },
-    evidence: "USER root",
-    recommendation: "Run as a non-root user where possible."
+    evidence: "This comment is a complete sentence.",
+    recommendation: "Use complete-sentence comments intentionally where they clarify non-obvious code."
   });
 });
 
@@ -54,15 +70,13 @@ Creates an adversary app.
 
 ```ts
 const app = new Adversary({
-  name: "adversarylabs/example",
-  schemaVersion: "adversary.findings.v1"
+  name: "adversarylabs/example"
 });
 ```
 
 ### `app.rule(ruleId, handler)`
 
-Registers a rule. Prefer reporting through `ctx.observe(...)` or `ctx.finding(...)`. A rule may
-still return `undefined`, `null`, one legacy `Finding`, or an array of legacy `Finding` objects.
+Registers a rule. Rules report through `ctx.observe(...)`, `ctx.finding(...)`, and `ctx.review.*`.
 
 Rule context exposes:
 
@@ -79,10 +93,43 @@ Rule context exposes:
 - `ctx.review.observe(note)`
 - `ctx.review.opinion(opinion)`
 
+### `defineRule(definition)`
+
+Registers domain-specific aggregation for a stable rule id. The SDK still owns grouping,
+deduplication, ranking, suppression, and rendering; the rule definition supplies engineering
+language for a grouped set of observations.
+
+```ts
+defineRule({
+  id: "comments.complete-sentence",
+  category: "code-style",
+  defaultSeverity: "info",
+  defaultConfidence: "high",
+  groupBy: ["ruleId", "subject"],
+  aggregate(observations) {
+    return {
+      title:
+        observations.length === 1
+          ? "Comment is a complete sentence"
+          : "Comments contain complete sentences",
+      confidence: "high",
+      summary: `${observations.length} comments are written as complete sentences.`,
+      whyItMatters:
+        "Comments are most useful when they explain non-obvious intent rather than restating code.",
+      recommendation:
+        "Keep complete-sentence comments only when they explain non-obvious intent."
+    };
+  }
+});
+```
+
+`category`, `defaultSeverity`, `defaultConfidence`, and `groupBy` act as defaults for observations
+with the same `ruleId`. If a rule has no `aggregate(...)`, the SDK uses generic synthesis.
+
 ### `ctx.observe(input)`
 
 Use observations for raw detector output and evidence. Observations are normalized, deduplicated,
-grouped, ranked, and rendered by the SDK.
+grouped, synthesized, ranked, and rendered by the SDK. Prefer this path for new adversaries.
 
 Default grouping uses:
 
@@ -90,22 +137,22 @@ Default grouping uses:
 ruleId + subject + category
 ```
 
-Override it with `groupKey` when the detector knows the exact issue boundary:
+Rule definitions can override this with `groupBy`. Individual observations can still override the
+issue boundary with `groupKey`:
 
 ```ts
 ctx.observe({
-  ruleId: "base-image-unpinned",
-  subject: "node:22-bookworm-slim",
-  groupKey: "unpinned-node-base-image",
-  category: "supply-chain",
-  severity: "low",
+  ruleId: "comments.complete-sentence",
+  subject: "src/index.ts",
+  groupKey: "complete-sentence-comments",
+  category: "code-style",
+  severity: "info",
   confidence: 0.95,
-  title: "Base images are not pinned by digest",
-  location: { file: "Dockerfile", line: 3 },
-  evidence: { stage: "deps", instruction: "FROM node:22-bookworm-slim AS deps" },
+  title: "Comments contain complete sentences",
+  location: { file: "src/index.ts", line: 3 },
+  evidence: { comment: "This comment is a complete sentence." },
   recommendation: {
-    summary: "Pin production base images by digest when reproducibility matters.",
-    details: "Use Renovate or Dependabot to keep pinned digests current."
+    summary: "Use complete-sentence comments intentionally where they clarify non-obvious code."
   }
 });
 ```
@@ -118,26 +165,29 @@ Use completed findings when the adversary has already synthesized the issue:
 
 ```ts
 ctx.finding({
-  title: "Base images are not pinned by digest",
-  category: "supply-chain",
-  severity: "low",
+  title: "Comments contain complete sentences",
+  category: "code-style",
+  severity: "info",
   confidence: "high",
-  summary: "Three build stages reference node:22-bookworm-slim by tag rather than digest.",
-  whyItMatters: "Tags are mutable and can resolve to different images over time.",
-  impact: "Future builds may consume different base images even when the Dockerfile has not changed.",
+  summary: "Three comments are written as complete sentences.",
+  whyItMatters: "Complete-sentence comments can be useful for intent, but noisy when they restate code.",
+  impact: "Reviewers may spend time reading comments that do not add much context.",
   evidence: [
-    { file: "Dockerfile", line: 3, message: "deps stage" },
-    { file: "Dockerfile", line: 11, message: "builder stage" },
-    { file: "Dockerfile", line: 20, message: "runner stage" }
+    { file: "src/index.ts", line: 3, message: "Explains parser intent." },
+    { file: "src/index.ts", line: 11, message: "Explains fallback behavior." },
+    { file: "src/index.ts", line: 20, message: "Explains output formatting." }
   ],
-  recommendation:
-    "Pin production images using image:tag@sha256:<digest> and automate digest updates.",
-  remediation: { estimate: "10-20 minutes" }
+  recommendation: "Keep complete-sentence comments only when they explain non-obvious intent.",
+  remediation: { complexity: "trivial" }
 });
 ```
 
 Completed findings still pass through validation, deduplication, ranking, suppression, and
 rendering.
+
+`remediation.complexity` accepts `"trivial"`, `"small"`, `"medium"`, `"large"`, or
+`"architectural"`. It remains available in structured output but is not rendered in the default
+terminal review.
 
 ### Confidence
 
@@ -151,13 +201,36 @@ Default numeric thresholds:
 
 Customize thresholds with `new Adversary({ review: { confidenceThresholds } })`.
 
+### Severity
+
+The SDK uses severity as a review calibration signal, not just a detector label.
+
+- `info`: interesting observations.
+- `low`: reasonable engineering improvements.
+- `medium`: issues likely to create operational problems.
+- `high`: security, correctness, or reliability risks.
+- `critical`: immediate production risk.
+
+Override calibration when needed:
+
+```ts
+new Adversary({
+  name: "adversarylabs/example",
+  review: {
+    severityOverrides: {
+      "rule.id": "medium"
+    }
+  }
+});
+```
+
 ### Suppression and Ranking
 
 Review policy controls human-readable output:
 
 ```ts
 new Adversary({
-  name: "adversarylabs/dockerfile",
+  name: "adversarylabs/comment-sentences",
   review: {
     minimumConfidence: "medium",
     maximumFindings: 5,
@@ -171,8 +244,8 @@ Suppressed findings are counted and can be included with `run({ includeSuppresse
 Raw observations can be included with `run({ includeRawObservations: true })`.
 
 Ranking is deterministic and considers severity, confidence, affected evidence count, runtime or
-production tags, and remediation hints. It is not severity-only; a high-confidence medium issue can
-rank above a speculative high-severity issue.
+production tags, and qualitative remediation complexity. It is not severity-only; a high-confidence
+medium issue can rank above a speculative high-severity issue.
 
 ### Review Notes
 
@@ -180,37 +253,50 @@ Use review-level APIs for concise summaries that are not findings:
 
 ```ts
 ctx.review.assessment({
-  risk: "low",
-  summary: "This is a well-structured multi-stage Node Dockerfile."
+  risk: "none",
+  summary: "This review only reports complete-sentence comments."
 });
 
 ctx.review.positive({
-  key: "multi-stage-build",
-  summary: "Dependency installation, build, and runtime are separated cleanly.",
-  evidence: [{ file: "Dockerfile", line: 3 }]
+  key: "intentional-comments",
+  summary: "Several comments explain intent rather than restating implementation.",
+  evidence: [{ file: "src/index.ts", line: 3 }]
 });
 
 ctx.review.observe({
-  key: "minimal-runtime-stage",
-  summary: "The runtime stage reuses built artifacts rather than rebuilding them."
+  key: "sentence-style",
+  summary: "Some comments are written as complete sentences."
 });
 
 ctx.review.opinion({
   ship: true,
-  summary: "I would ship this Dockerfile as-is. Digest pinning is the only material improvement identified."
+  summary: "Comment sentence style does not block shipping."
+});
+
+ctx.review.score({
+  key: "production-readiness",
+  label: "Production readiness",
+  score: 8.8,
+  max: 10,
+  summary: "Ready"
 });
 ```
 
-### `new Finding(input)`
+Scores are optional. They are included in JSON and rendered in terminal output when present.
 
-Creates a legacy CLI-compatible finding. `id` defaults to `ruleId`; `file` defaults to `path`.
-Prefer `ctx.finding(...)` for new adversaries. `ctx.findings.add(...)` remains as a deprecated
-compatibility wrapper.
+### Observation-First Authoring
 
-### `Severity`
+Prefer `ctx.observe(...)` for new adversaries. The intended flow is:
 
-Use `Severity.Info`, `Severity.Low`, `Severity.Medium`, `Severity.High`, or
-`Severity.Critical`. Values serialize as lowercase strings.
+```text
+observe -> group -> synthesize -> rank -> review
+```
+
+Adversaries should describe what they observed, where it happened, and why it matters. The SDK
+should decide how observations group, which findings survive suppression, how they are ranked, and
+how they are presented.
+
+Use `ctx.finding(...)` when the adversary has already done issue synthesis itself.
 
 ### `log`
 
@@ -232,6 +318,7 @@ type ReviewResult = {
   assessment?: { risk: "none" | "low" | "medium" | "high" | "critical"; summary?: string };
   positives: ReviewNote[];
   observations: ReviewNote[];
+  scores?: ReviewScore[];
   findings: ReviewFinding[];
   opinion?: { ship?: boolean; summary: string };
   suppressed: { observations: number; findings: number };
@@ -288,12 +375,51 @@ findings:
 ```ts
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { Adversary } from "@adversary/sdk";
+import { Adversary, defineRule } from "@adversary/sdk";
 
 const app = new Adversary({
   name: "adversarylabs/comment-sentences",
   review: {
     minimumConfidence: "medium"
+  }
+});
+
+defineRule({
+  id: "comments.complete-sentence",
+  category: "code-style",
+  defaultSeverity: "info",
+  defaultConfidence: "high",
+  groupBy: ["ruleId", "subject"],
+  aggregate(observations) {
+    return {
+      title:
+        observations.length === 1
+          ? "Comment is a complete sentence"
+          : "Comments contain complete sentences",
+      confidence: "high",
+      summary: `${observations.length} comments in ${observations[0]?.subject ?? "the file"} are written as complete sentences.`,
+      whyItMatters:
+        "Comments are most useful when they explain non-obvious intent rather than restating code.",
+      impact: "Repeated prose can make routine code harder to scan during review.",
+      evidence: observations.map((observation) => ({
+        file: observation.location?.file,
+        line: observation.location?.line,
+        message: "complete sentence",
+        snippet:
+          typeof observation.evidence === "object" && observation.evidence !== null
+            ? String(observation.evidence.comment)
+            : undefined,
+        data:
+          typeof observation.evidence === "object" && observation.evidence !== null
+            ? observation.evidence
+            : undefined
+      })),
+      recommendation:
+        "Keep complete-sentence comments only when they explain non-obvious intent.",
+      remediation: {
+        complexity: "trivial"
+      }
+    };
   }
 });
 
@@ -319,19 +445,14 @@ app.rule("comments.complete-sentence", async (ctx) => {
       ctx.observe({
         ruleId: "comments.complete-sentence",
         subject: file,
-        category: "code-style",
-        severity: "info",
         confidence: "high",
-        title: "Comments contain complete sentences",
+        title: "Comment is a complete sentence",
         location: {
           file,
           line: index + 1
         },
         evidence: {
           comment
-        },
-        recommendation: {
-          summary: "Use complete-sentence comments intentionally where they clarify non-obvious code."
         },
         tags: ["style"]
       });
@@ -354,7 +475,7 @@ export default app;
 
 ## Runtime Contract
 
-Input is read from:
+Input is read from `ADVERSARY_INPUT` when set, otherwise:
 
 ```text
 /adversary/input.json
@@ -370,7 +491,7 @@ Expected input:
 }
 ```
 
-Output is written to:
+Output is written to `ADVERSARY_OUTPUT` when set, otherwise:
 
 ```text
 /adversary/output.json
@@ -380,25 +501,25 @@ Output shape:
 
 ```json
 {
-  "adversary": {
-    "name": "adversarylabs/example"
-  },
-  "target": {
-    "repository": "/repo",
-    "filesScanned": 2
-  },
-  "positives": [],
-  "observations": [],
-  "findings": [],
-  "suppressed": {
-    "observations": 0,
-    "findings": 0
+  "protocolVersion": 1,
+  "result": {
+    "adversary": {
+      "name": "adversarylabs/example"
+    },
+    "target": {
+      "repository": "/repo",
+      "filesScanned": 2
+    },
+    "positives": [],
+    "observations": [],
+    "findings": [],
+    "suppressed": {
+      "observations": 0,
+      "findings": 0
+    }
   }
 }
 ```
-
-The SDK still accepts legacy `Finding` objects returned from rules and adapts them into normalized
-review findings.
 
 ## Development
 

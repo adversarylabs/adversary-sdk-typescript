@@ -1,16 +1,12 @@
-name: dockerfile-adversary
+name: comment-sentence-adversary
 version: 0.1.0
-description: Finds suspicious Dockerfile ENV and ARG variables.
+description: Reports TypeScript comments that are written as complete sentences.
 
 triggers:
   manual: true
   files_changed:
-    - Dockerfile
-    - "**/Dockerfile"
-    - Dockerfile.*
-    - "**/Dockerfile.*"
-    - "*.dockerfile"
-    - "**/*.dockerfile"
+    - "*.ts"
+    - "**/*.ts"
 
 runtime:
   name: node

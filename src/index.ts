@@ -3,7 +3,7 @@ import { dirname, isAbsolute, relative, resolve } from "node:path";
 
 export const DEFAULT_INPUT_PATH = "/adversary/input.json";
 export const DEFAULT_OUTPUT_PATH = "/adversary/output.json";
-export const FINDINGS_SCHEMA_VERSION = "adversary.findings.v1";
+export const ADVERSARY_RUN_PROTOCOL_VERSION = 1;
 
 const verboseValues = new Set(["1", "true", "TRUE", "yes", "YES"]);
 
@@ -16,6 +16,34 @@ export const Severity = {
 } as const;
 
 export type Severity = (typeof Severity)[keyof typeof Severity];
+
+export interface SeverityGuidanceEntry {
+  severity: Severity;
+  guidance: string;
+}
+
+export const DEFAULT_SEVERITY_GUIDANCE: SeverityGuidanceEntry[] = [
+  {
+    severity: Severity.Info,
+    guidance: "Interesting observations.",
+  },
+  {
+    severity: Severity.Low,
+    guidance: "Reasonable engineering improvements.",
+  },
+  {
+    severity: Severity.Medium,
+    guidance: "Issues likely to create operational problems.",
+  },
+  {
+    severity: Severity.High,
+    guidance: "Security, correctness, or reliability risks.",
+  },
+  {
+    severity: Severity.Critical,
+    guidance: "Immediate production risk.",
+  },
+];
 
 export const Confidence = {
   Low: "low",
@@ -37,17 +65,23 @@ export const DEFAULT_CONFIDENCE_THRESHOLDS: ConfidenceThresholds = {
 };
 
 export interface Evidence {
+  location?: {
+    file?: string;
+    line?: number;
+    endLine?: number;
+  };
   file?: string;
   line?: number;
   endLine?: number;
+  label?: string;
   message?: string;
   snippet?: string;
+  data?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
 }
 
 export interface Remediation {
-  estimate?: string;
-  complexity?: "trivial" | "small" | "medium" | "large";
+  complexity?: "trivial" | "small" | "medium" | "large" | "architectural";
 }
 
 export interface RecommendationInput {
@@ -55,18 +89,43 @@ export interface RecommendationInput {
   details?: string;
 }
 
+export type ObservationTitle =
+  | string
+  | {
+      singular: string;
+      plural: string;
+    };
+
+export type ObservationSummary =
+  | string
+  | {
+      singular?: string;
+      grouped?: string;
+    };
+
+export type ConfidenceAggregation = "maximum" | "minimum" | "average";
+export type SeverityAggregation = "highest" | "lowest";
+
 export interface ObservationInit {
   ruleId: string;
   subject: string;
   groupKey?: string;
+  groupBy?: string[];
+  groupedTitle?: string;
   deduplicate?: boolean;
-  category: string;
-  severity: Severity;
-  confidence: ConfidenceInput;
-  title: string;
+  category?: string;
+  severity?: Severity;
+  confidence?: ConfidenceInput;
+  confidenceAggregation?: ConfidenceAggregation;
+  severityAggregation?: SeverityAggregation;
+  title: ObservationTitle;
+  summary?: ObservationSummary;
+  whyItMatters?: string;
+  impact?: string;
   location?: Evidence;
   evidence?: string | Record<string, unknown>;
   recommendation?: string | RecommendationInput;
+  remediation?: Remediation;
   tags?: string[];
   metadata?: Record<string, unknown>;
 }
@@ -104,6 +163,7 @@ export interface ReviewFinding {
   evidence: Evidence[];
   recommendation?: string;
   remediation?: Remediation;
+  synthesisSource?: "rule" | "generic";
   tags?: string[];
   metadata?: Record<string, unknown>;
 }
@@ -125,11 +185,20 @@ export interface ReviewOpinion {
   summary: string;
 }
 
+export interface ReviewScore {
+  key: string;
+  label?: string;
+  score: number;
+  max?: number;
+  summary?: string;
+}
+
 export interface ReviewPolicy {
   minimumConfidence?: Confidence;
   maximumFindings?: number;
   includeInformational?: boolean;
   confidenceThresholds?: ConfidenceThresholds;
+  severityOverrides?: Record<string, Severity>;
 }
 
 export interface ReviewResult {
@@ -144,6 +213,7 @@ export interface ReviewResult {
   assessment?: ReviewAssessment;
   positives: ReviewNote[];
   observations: ReviewNote[];
+  scores?: ReviewScore[];
   findings: ReviewFinding[];
   opinion?: ReviewOpinion;
   suppressed: {
@@ -160,6 +230,11 @@ export interface ReviewResult {
   rawObservations?: ObservationInit[];
 }
 
+export interface AdversaryRunEnvelope {
+  protocolVersion: typeof ADVERSARY_RUN_PROTOCOL_VERSION;
+  result: ReviewResult;
+}
+
 export interface RuntimeInput {
   source: {
     path: string;
@@ -169,45 +244,7 @@ export interface RuntimeInput {
 
 export interface Summary {
   files_scanned?: number;
-  rules_executed?: number;
   [key: string]: number | string | boolean | null | undefined;
-}
-
-export interface FindingInit {
-  ruleId: string;
-  id?: string;
-  severity: Severity;
-  title: string;
-  message?: string;
-  path?: string;
-  file?: string;
-  line?: number;
-  column?: number;
-  evidence?: string;
-  recommendation?: string;
-  metadata?: Record<string, unknown>;
-}
-
-export interface SerializedFinding {
-  rule_id: string;
-  id: string;
-  severity: Severity;
-  title: string;
-  message?: string;
-  path?: string;
-  file?: string;
-  line?: number;
-  column?: number;
-  evidence?: string;
-  recommendation?: string;
-  metadata?: Record<string, unknown>;
-}
-
-export interface Output {
-  schema_version: typeof FINDINGS_SCHEMA_VERSION;
-  adversary: string;
-  summary: Summary;
-  findings: SerializedFinding[];
 }
 
 export interface RuleContext {
@@ -219,25 +256,20 @@ export interface RuleContext {
   rglob: (pattern: string) => Promise<string[]>;
   observe: (observation: ObservationInit) => void;
   finding: (finding: FindingInput) => void;
-  findings: {
-    /** @deprecated Use ctx.finding(...) for normalized review findings. */
-    add: (finding: Finding | FindingInit) => void;
-  };
   review: {
     assessment: (assessment: ReviewAssessment) => void;
     positive: (note: ReviewNote) => void;
     observe: (note: ReviewNote) => void;
+    score: (score: ReviewScore) => void;
     opinion: (opinion: ReviewOpinion) => void;
   };
 }
 
-export type RuleResult = undefined | null | Finding | Finding[];
-export type RuleHandler = (context: RuleContext) => RuleResult | Promise<RuleResult>;
+export type RuleHandler = (context: RuleContext) => void | Promise<void>;
 
 export interface AdversaryOptions {
   name: string;
   version?: string;
-  schemaVersion?: typeof FINDINGS_SCHEMA_VERSION;
   review?: ReviewPolicy;
 }
 
@@ -253,6 +285,38 @@ export interface RunOptions {
 
 export interface ReviewRenderer {
   render(result: ReviewResult): Promise<void> | void;
+}
+
+export interface RuleDefinition {
+  id: string;
+  category?: string;
+  defaultSeverity?: Severity;
+  defaultConfidence?: ConfidenceInput;
+  groupBy?: string[];
+  aggregate?: (observations: ObservationInit[]) => Partial<ReviewFinding>;
+}
+
+export class RuleRegistry {
+  private readonly rules = new Map<string, RuleDefinition>();
+
+  register(rule: RuleDefinition): void {
+    assertRuleDefinition(rule);
+    this.rules.set(rule.id, rule);
+  }
+
+  lookup(ruleId: string): RuleDefinition | undefined {
+    return this.rules.get(ruleId);
+  }
+
+  has(ruleId: string): boolean {
+    return this.rules.has(ruleId);
+  }
+}
+
+export const ruleRegistry = new RuleRegistry();
+
+export function defineRule(rule: RuleDefinition): void {
+  ruleRegistry.register(rule);
 }
 
 export const log = {
@@ -277,59 +341,9 @@ export const log = {
   },
 };
 
-export class Finding {
-  readonly ruleId: string;
-  readonly id: string;
-  readonly severity: Severity;
-  readonly title: string;
-  readonly message?: string;
-  readonly path?: string;
-  readonly file?: string;
-  readonly line?: number;
-  readonly column?: number;
-  readonly evidence?: string;
-  readonly recommendation?: string;
-  readonly metadata?: Record<string, unknown>;
-
-  constructor(init: FindingInit) {
-    assertFindingInit(init);
-
-    this.ruleId = init.ruleId;
-    this.id = init.id ?? init.ruleId;
-    this.severity = init.severity;
-    this.title = init.title;
-    this.message = init.message;
-    this.path = init.path;
-    this.file = init.file ?? init.path;
-    this.line = init.line;
-    this.column = init.column;
-    this.evidence = init.evidence;
-    this.recommendation = init.recommendation;
-    this.metadata = init.metadata;
-  }
-
-  toJSON(): SerializedFinding {
-    return omitUndefined({
-      rule_id: this.ruleId,
-      id: this.id,
-      severity: this.severity,
-      title: this.title,
-      message: this.message,
-      path: this.path,
-      file: this.file,
-      line: this.line,
-      column: this.column,
-      evidence: this.evidence,
-      recommendation: this.recommendation,
-      metadata: this.metadata,
-    });
-  }
-}
-
 export class Adversary {
   readonly name: string;
   readonly version?: string;
-  readonly schemaVersion: typeof FINDINGS_SCHEMA_VERSION;
   readonly rules: Array<{ id: string; handler: RuleHandler }> = [];
   readonly reviewPolicy: ReviewPolicy;
 
@@ -338,13 +352,8 @@ export class Adversary {
       throw new Error("Adversary name must be a non-empty string.");
     }
 
-    if (options.schemaVersion !== undefined && options.schemaVersion !== FINDINGS_SCHEMA_VERSION) {
-      throw new Error(`Unsupported schemaVersion "${options.schemaVersion}".`);
-    }
-
     this.name = options.name;
     this.version = options.version;
-    this.schemaVersion = options.schemaVersion ?? FINDINGS_SCHEMA_VERSION;
     this.reviewPolicy = options.review ?? {};
   }
 
@@ -359,53 +368,48 @@ export class Adversary {
   async run(options: RunOptions = {}): Promise<ReviewResult> {
     const startedAt = performance.now();
     const input = options.input ?? (await parseInput(options.inputPath));
-    const repoPath = input.source.path;
+    const repoPath = process.env.ADVERSARY_REPO ?? input.source.path;
     const summary: Summary = {};
     const cache = new Map<string, unknown>();
     const collector = createReviewCollector();
     const context = createRuleContext(repoPath, summary, cache, collector);
-    const findings: SerializedFinding[] = [];
+    const includeSuppressed =
+      options.includeSuppressed ?? parseBooleanEnv(process.env.ADVERSARY_INCLUDE_SUPPRESSED);
 
     for (const rule of this.rules) {
       log.debug(`running rule ${rule.id}`);
-      const result = await rule.handler(context);
-      findings.push(...normalizeRuleResult(result));
+      await rule.handler(context);
     }
 
-    for (const finding of findings) {
-      collector.findings.push(legacyFindingToReviewFinding(finding));
-    }
-
-    if (summary.rules_executed === undefined) {
-      summary.rules_executed = this.rules.length;
-    }
-
-    const legacyOutput: Output = {
-      schema_version: this.schemaVersion,
-      adversary: this.name,
-      summary,
-      findings: sortFindings(findings),
-    };
     const output = buildReviewResult({
       adversary: { name: this.name, version: this.version },
       repository: repoPath,
       filesScanned: typeof summary.files_scanned === "number" ? summary.files_scanned : undefined,
       collector,
       policy: { ...this.reviewPolicy, ...options.review },
-      includeSuppressed: options.includeSuppressed,
+      includeSuppressed,
       includeRawObservations: options.includeRawObservations,
       timing: { totalMs: Math.round(performance.now() - startedAt) },
     });
 
     if (options.write !== false) {
-      await writeOutput(output, options.outputPath);
+      await writeOutput(createAdversaryRunEnvelope(output), options.outputPath);
     }
 
     return output;
   }
 }
 
-export async function parseInput(path = DEFAULT_INPUT_PATH): Promise<RuntimeInput> {
+export function createAdversaryRunEnvelope(result: ReviewResult): AdversaryRunEnvelope {
+  return {
+    protocolVersion: ADVERSARY_RUN_PROTOCOL_VERSION,
+    result,
+  };
+}
+
+export async function parseInput(
+  path = process.env.ADVERSARY_INPUT ?? DEFAULT_INPUT_PATH,
+): Promise<RuntimeInput> {
   const raw = await readFile(path, "utf8");
   const parsed: unknown = JSON.parse(raw);
 
@@ -424,7 +428,10 @@ export async function parseInput(path = DEFAULT_INPUT_PATH): Promise<RuntimeInpu
   return parsed as RuntimeInput;
 }
 
-export async function writeOutput(output: unknown, path = DEFAULT_OUTPUT_PATH): Promise<void> {
+export async function writeOutput(
+  output: unknown,
+  path = process.env.ADVERSARY_OUTPUT ?? DEFAULT_OUTPUT_PATH,
+): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, `${JSON.stringify(output, null, 2)}\n`, "utf8");
 }
@@ -505,8 +512,32 @@ export class TerminalRenderer implements ReviewRenderer {
       lines.push("Overall assessment", "");
       lines.push(`Risk: ${capitalize(result.assessment.risk)}`, "");
       if (result.assessment.summary !== undefined) {
-        lines.push(result.assessment.summary, "");
+        lines.push(normalizeParagraph(result.assessment.summary), "");
       }
+    }
+
+    if (result.scores !== undefined && result.scores.length > 0) {
+      lines.push("Scores", "");
+      for (const score of result.scores) {
+        lines.push(formatScore(score));
+      }
+      lines.push("");
+    }
+
+    if (result.positives.length > 0) {
+      lines.push("Positive signals", "");
+      for (const positive of result.positives) {
+        lines.push(`- ${normalizeParagraph(positive.summary)}`);
+      }
+      lines.push("");
+    }
+
+    if (result.observations.length > 0) {
+      lines.push("Additional observations", "");
+      for (const observation of result.observations) {
+        lines.push(`- ${normalizeParagraph(observation.summary)}`);
+      }
+      lines.push("");
     }
 
     const primary = result.findings[0];
@@ -516,7 +547,7 @@ export class TerminalRenderer implements ReviewRenderer {
     }
 
     if (result.opinion !== undefined) {
-      lines.push("Overall opinion", "", result.opinion.summary, "");
+      lines.push("Overall opinion", "", normalizeParagraph(result.opinion.summary), "");
     }
 
     lines.push("Scan complete", "");
@@ -547,38 +578,18 @@ export class TerminalRenderer implements ReviewRenderer {
       if (finding.evidence.length > 0) {
         lines.push("Evidence", "");
         for (const evidence of finding.evidence) {
-          lines.push(`- ${formatEvidence(evidence)}`);
+          lines.push(...formatEvidenceLines(evidence));
         }
         lines.push("");
       }
 
       if (finding.recommendation !== undefined) {
-        lines.push("Recommendation", "", finding.recommendation, "");
-      }
-
-      if (finding.remediation?.estimate !== undefined) {
-        lines.push("Estimated remediation", "", finding.remediation.estimate, "");
+        lines.push("Recommendation", "", normalizeParagraph(finding.recommendation), "");
       }
     }
 
     this.write(`${lines.join("\n").trimEnd()}\n`);
   }
-}
-
-export function sortFindings(findings: SerializedFinding[]): SerializedFinding[] {
-  return [...findings].sort((left, right) => {
-    const pathComparison = compareStrings(left.path ?? "", right.path ?? "");
-    if (pathComparison !== 0) {
-      return pathComparison;
-    }
-
-    const lineComparison = compareNumbers(left.line, right.line);
-    if (lineComparison !== 0) {
-      return lineComparison;
-    }
-
-    return compareStrings(left.rule_id, right.rule_id);
-  });
 }
 
 function createRuleContext(
@@ -610,12 +621,6 @@ function createRuleContext(
       assertFindingInput(finding, "ctx.finding");
       collector.findings.push(normalizeFindingInput(finding));
     },
-    findings: {
-      add(finding: Finding | FindingInit): void {
-        const normalized = finding instanceof Finding ? finding : new Finding(finding);
-        collector.findings.push(legacyFindingToReviewFinding(normalized.toJSON()));
-      },
-    },
     review: {
       assessment(assessment: ReviewAssessment): void {
         assertAssessment(assessment);
@@ -629,21 +634,16 @@ function createRuleContext(
         assertReviewNote(note, "ctx.review.observe");
         collector.reviewObservations.push(note);
       },
+      score(score: ReviewScore): void {
+        assertReviewScore(score);
+        collector.scores.push(score);
+      },
       opinion(opinion: ReviewOpinion): void {
         assertOpinion(opinion);
         collector.opinion = opinion;
       },
     },
   };
-}
-
-function normalizeRuleResult(result: RuleResult): SerializedFinding[] {
-  if (result === undefined || result === null) {
-    return [];
-  }
-
-  const findings = Array.isArray(result) ? result : [result];
-  return findings.map((item) => item.toJSON());
 }
 
 async function findMatchingPaths(
@@ -697,34 +697,13 @@ function globPatternToRegExp(pattern: string): RegExp {
   return new RegExp(`^${source}$`);
 }
 
-function assertFindingInit(value: FindingInit): void {
-  requireString(value.ruleId, "ruleId");
-  requireString(value.title, "title");
-
-  if (!isSeverity(value.severity)) {
-    throw new Error("Finding severity must be one of Severity.Info, Low, Medium, High, Critical.");
-  }
-
-  optionalString(value.id, "id");
-  optionalString(value.message, "message");
-  optionalString(value.path, "path");
-  optionalString(value.file, "file");
-  optionalPositiveInteger(value.line, "line");
-  optionalPositiveInteger(value.column, "column");
-  optionalString(value.evidence, "evidence");
-  optionalString(value.recommendation, "recommendation");
-
-  if (value.metadata !== undefined && !isRecord(value.metadata)) {
-    throw new Error("Finding metadata must be an object.");
-  }
-}
-
 interface ReviewCollector {
   observations: ObservationInit[];
   findings: ReviewFinding[];
   assessment?: ReviewAssessment;
   positives: ReviewNote[];
   reviewObservations: ReviewNote[];
+  scores: ReviewScore[];
   opinion?: ReviewOpinion;
 }
 
@@ -734,6 +713,7 @@ function createReviewCollector(): ReviewCollector {
     findings: [],
     positives: [],
     reviewObservations: [],
+    scores: [],
   };
 }
 
@@ -749,7 +729,9 @@ function buildReviewResult(input: {
 }): ReviewResult {
   const thresholds = input.policy.confidenceThresholds ?? DEFAULT_CONFIDENCE_THRESHOLDS;
   const synthesized = synthesizeObservationFindings(input.collector.observations, thresholds);
-  const allFindings = deduplicateFindings([...synthesized, ...input.collector.findings]);
+  const allFindings = deduplicateFindings([...synthesized, ...input.collector.findings]).map(
+    (finding) => calibrateFindingSeverity(finding, input.policy),
+  );
   const ranked = rankFindings(allFindings);
   const minimumConfidence = input.policy.minimumConfidence ?? Confidence.Medium;
   const includeInformational = input.policy.includeInformational ?? false;
@@ -770,17 +752,25 @@ function buildReviewResult(input: {
     }
   }
 
+  const positives = selectPositiveSignals(input.collector.positives);
+  const reviewObservations = deduplicateReviewObservations(
+    input.collector.reviewObservations,
+    positives,
+  );
+
   return omitUndefined({
     adversary: input.adversary,
     target: omitUndefined({
       repository: input.repository,
       filesScanned: input.filesScanned,
     }),
-    assessment: input.collector.assessment,
-    positives: deduplicateNotes(input.collector.positives),
-    observations: deduplicateNotes(input.collector.reviewObservations),
+    assessment: input.collector.assessment ?? synthesizeAssessment(eligible, positives),
+    positives,
+    observations: reviewObservations,
+    scores:
+      input.collector.scores.length > 0 ? deduplicateScores(input.collector.scores) : undefined,
     findings: eligible,
-    opinion: input.collector.opinion,
+    opinion: input.collector.opinion ?? synthesizeOpinion(eligible),
     suppressed: {
       observations: 0,
       findings: suppressedFindings.length,
@@ -799,7 +789,8 @@ function synthesizeObservationFindings(
   const seen = new Set<string>();
 
   for (const observation of observations) {
-    const groupKey = observation.groupKey ?? defaultObservationGroupKey(observation);
+    const rule = ruleRegistry.lookup(observation.ruleId);
+    const groupKey = observation.groupKey ?? defaultObservationGroupKey(observation, rule);
     const dedupeKey = stableStringify({ groupKey, observation });
     if (observation.deduplicate !== false && seen.has(dedupeKey)) {
       continue;
@@ -814,37 +805,55 @@ function synthesizeObservationFindings(
       throw new Error("Cannot synthesize finding from an empty observation group.");
     }
 
-    const evidence = deduplicateEvidence(group.map(observationToEvidence));
-    const recommendation = uniqueStrings(
-      group.flatMap((observation) => {
-        if (typeof observation.recommendation === "string") {
-          return [observation.recommendation];
-        }
-        if (observation.recommendation !== undefined) {
-          return [observation.recommendation.summary, observation.recommendation.details].filter(
-            isNonEmptyString,
-          );
-        }
-        return [];
-      }),
-    ).join("\n\n");
-    const confidence = strongestConfidence(
-      group.map((observation) => normalizeConfidence(observation.confidence, thresholds)),
+    const rule = ruleRegistry.lookup(first.ruleId);
+    const synthesis = rule?.aggregate?.(group) ?? {};
+    const synthesisSource = rule?.aggregate === undefined ? "generic" : "rule";
+    log.debug(
+      `review synthesis ruleId=${first.ruleId} groupKey=${groupKey} observations=${group.length} selected=${synthesisSource} fallback=${synthesisSource === "generic"}`,
+    );
+
+    const evidence = deduplicateEvidence(synthesis.evidence ?? group.map(observationToEvidence));
+    const recommendation =
+      synthesis.recommendation === undefined
+        ? synthesizeRecommendation(group)
+        : normalizeParagraph(synthesis.recommendation);
+    const confidence = aggregateConfidence(
+      group.map((observation) =>
+        normalizeConfidence(
+          observation.confidence ?? rule?.defaultConfidence ?? Confidence.Medium,
+          thresholds,
+        ),
+      ),
+      first.confidenceAggregation ?? "maximum",
+    );
+    const severity = aggregateSeverity(
+      group.map((observation) => observation.severity ?? rule?.defaultSeverity ?? Severity.Info),
+      first.severityAggregation ?? "highest",
     );
 
     return {
-      id: stableId(`${first.ruleId}:${groupKey}`),
-      ruleId: first.ruleId,
-      groupKey,
-      title: first.title,
-      category: first.category,
-      severity: strongestSeverity(group.map((observation) => observation.severity)),
-      confidence,
-      summary: summarizeObservationGroup(first, group.length),
+      id: synthesis.id ?? stableId(`${first.ruleId}:${groupKey}`),
+      ruleId: synthesis.ruleId ?? first.ruleId,
+      groupKey: synthesis.groupKey ?? groupKey,
+      title:
+        synthesis.title ??
+        synthesizeObservationTitle(first.title, group.length, first.groupedTitle),
+      category: synthesis.category ?? first.category ?? rule?.category ?? "general",
+      severity: synthesis.severity ?? severity,
+      confidence:
+        synthesis.confidence ??
+        (rule?.defaultConfidence === undefined
+          ? confidence
+          : normalizeConfidence(rule.defaultConfidence, thresholds)),
+      summary: synthesis.summary ?? summarizeObservationGroup(group),
+      whyItMatters: synthesis.whyItMatters ?? first.whyItMatters,
+      impact: synthesis.impact ?? first.impact,
       evidence,
       recommendation: recommendation.length > 0 ? recommendation : undefined,
-      tags: uniqueStrings(group.flatMap((observation) => observation.tags ?? [])),
-      metadata: first.metadata,
+      remediation: synthesis.remediation ?? first.remediation,
+      synthesisSource,
+      tags: synthesis.tags ?? uniqueStrings(group.flatMap((observation) => observation.tags ?? [])),
+      metadata: synthesis.metadata ?? first.metadata,
     };
   });
 }
@@ -862,35 +871,12 @@ function normalizeFindingInput(input: FindingInput): ReviewFinding {
     whyItMatters: input.whyItMatters,
     impact: input.impact,
     evidence: deduplicateEvidence(input.evidence),
-    recommendation: input.recommendation,
+    recommendation:
+      input.recommendation === undefined ? undefined : normalizeParagraph(input.recommendation),
     remediation: input.remediation,
     tags: input.tags === undefined ? undefined : uniqueStrings(input.tags),
     metadata: input.metadata,
   }) as ReviewFinding;
-}
-
-function legacyFindingToReviewFinding(input: SerializedFinding): ReviewFinding {
-  const evidence = deduplicateEvidence([
-    omitUndefined({
-      file: input.file ?? input.path,
-      line: input.line,
-      message: input.evidence ?? input.message,
-      metadata: input.column === undefined ? undefined : { column: input.column },
-    }),
-  ]);
-
-  return {
-    id: input.id,
-    ruleId: input.rule_id,
-    title: input.title,
-    category: "legacy",
-    severity: input.severity,
-    confidence: Confidence.Medium,
-    summary: input.message ?? input.title,
-    evidence,
-    recommendation: input.recommendation,
-    metadata: input.metadata,
-  };
 }
 
 function deduplicateFindings(findings: ReviewFinding[]): ReviewFinding[] {
@@ -959,6 +945,196 @@ function deduplicateNotes(notes: ReviewNote[]): ReviewNote[] {
   return result.sort((left, right) => compareStrings(left.key, right.key));
 }
 
+function selectPositiveSignals(notes: ReviewNote[]): ReviewNote[] {
+  const selected: ReviewNote[] = [];
+  const seen = new Set<string>();
+
+  // Registration order expresses the review author's priority. Two strong signals
+  // provide useful context without diluting the findings.
+  for (const note of notes) {
+    if (!seen.has(note.key)) {
+      seen.add(note.key);
+      selected.push(note);
+    }
+    if (selected.length === 2) {
+      break;
+    }
+  }
+
+  return deduplicateNotes(selected);
+}
+
+function deduplicateReviewObservations(
+  observations: ReviewNote[],
+  positives: ReviewNote[],
+): ReviewNote[] {
+  const deduped = deduplicateNotes(observations);
+
+  return deduped.filter((item) => {
+    return !positives.some((positive) => notesDescribeSameFact(positive, item));
+  });
+}
+
+function notesDescribeSameFact(positive: ReviewNote, observation: ReviewNote): boolean {
+  if (positive.key === observation.key) {
+    return true;
+  }
+
+  const positiveText = normalizeSemanticText(`${positive.key} ${positive.summary}`);
+  const observationText = normalizeSemanticText(`${observation.key} ${observation.summary}`);
+  if (positiveText.length > 0 && positiveText === observationText) {
+    return true;
+  }
+
+  const positiveSignals = highSignalSemanticTokens(positiveText);
+  const observationSignals = highSignalSemanticTokens(observationText);
+  return positiveSignals.some((token) => observationSignals.includes(token));
+}
+
+function synthesizeAssessment(
+  findings: ReviewFinding[],
+  positives: ReviewNote[] = [],
+): ReviewAssessment {
+  const strength = assessmentStrength(positives[0], findings);
+
+  if (findings.length === 0) {
+    return {
+      risk: "none",
+      summary: joinSentences(
+        strength,
+        "No material concerns were identified in the reviewed repository.",
+      ),
+    };
+  }
+
+  const risk = highestRisk(findings);
+  const primary = findings[0];
+  const primaryConcern =
+    primary === undefined ? "the highest-ranked finding" : assessmentConcern(primary);
+
+  if (findings.length === 1) {
+    return {
+      risk,
+      summary: joinSentences(
+        strength,
+        `The only material concern identified is ${primaryConcern}.`,
+      ),
+    };
+  }
+
+  return {
+    risk,
+    summary: joinSentences(
+      strength,
+      `${numberWord(findings.length)} material concerns were identified. The highest-value improvement is ${primaryConcern}.`,
+    ),
+  };
+}
+
+function assessmentStrength(
+  positive: ReviewNote | undefined,
+  findings: ReviewFinding[],
+): string | undefined {
+  if (positive === undefined) {
+    return undefined;
+  }
+
+  if (findingsReferenceDockerfile(findings)) {
+    return "This is a well-structured production Dockerfile.";
+  }
+
+  const summary = normalizeParagraph(positive.summary);
+  if (/^uses\b/i.test(summary)) {
+    return `The repository ${lowercaseFirst(summary)}`;
+  }
+  return summary;
+}
+
+function assessmentConcern(finding: ReviewFinding): string {
+  const title = findingConcern(finding);
+  const recommendation = recommendationSubject(finding.recommendation);
+  if (recommendation === "Digest pinning" || /base images?.*digest/i.test(title)) {
+    const plural = /base images\b/i.test(title);
+    return `that the base ${plural ? "images are" : "image is"} referenced by mutable tags rather than immutable digests`;
+  }
+
+  const summary = normalizeParagraph(finding.summary).split(/(?<=[.!?])\s+/, 1)[0];
+  return concernClause(
+    lowercaseFirst(trimTrailingSentencePunctuation(summary ?? findingConcern(finding))),
+  );
+}
+
+function concernClause(concern: string): string {
+  const isClause =
+    /\b(?:allows|are|builds|can|contains|copies|could|did|do|does|exposes|has|have|includes|installs|is|lacks|may|might|must|reads|references|relies|requires|runs|uses|was|were|writes)\b/i.test(
+      concern,
+    );
+  if (!isClause) {
+    return concern;
+  }
+
+  const hasDeterminer = /^(?:a|an|any|each|its|no|one|some|the|their|these|this|those)\b/i.test(
+    concern,
+  );
+  return `that ${hasDeterminer ? concern : `the ${concern}`}`;
+}
+
+function joinSentences(...sentences: Array<string | undefined>): string {
+  return sentences.filter(isNonEmptyString).join(" ");
+}
+
+function synthesizeOpinion(findings: ReviewFinding[]): ReviewOpinion | undefined {
+  if (findings.length === 0) {
+    return {
+      ship: true,
+      summary: "I would ship this as-is.",
+    };
+  }
+
+  const highestSeverity = highestFindingSeverity(findings);
+  const ship = severityWeight(highestSeverity) < severityWeight(Severity.High);
+  const subject = findingsReferenceDockerfile(findings) ? "this Dockerfile" : "this";
+
+  if (findings.length > 1) {
+    return {
+      ship,
+      summary: "I would address the remaining findings before production.",
+    };
+  }
+
+  const finding = findings[0];
+  const improvement = finding === undefined ? "Addressing the finding" : improvementPhrase(finding);
+  return {
+    ship,
+    summary: ship
+      ? `I would ship ${subject} as-is. ${improvement} is the only improvement I would recommend before production.`
+      : `${improvement} is the most important improvement to address before production.`,
+  };
+}
+
+function findingsReferenceDockerfile(findings: ReviewFinding[]): boolean {
+  const files = findings.flatMap((finding) =>
+    finding.evidence
+      .map((evidence) => evidence.location?.file ?? evidence.file)
+      .filter(isNonEmptyString),
+  );
+  return files.length > 0 && files.every((file) => /(?:^|\/)Dockerfile$/.test(file));
+}
+
+function deduplicateScores(scores: ReviewScore[]): ReviewScore[] {
+  const seen = new Set<string>();
+  const result: ReviewScore[] = [];
+
+  for (const score of scores) {
+    if (!seen.has(score.key)) {
+      seen.add(score.key);
+      result.push(score);
+    }
+  }
+
+  return result.sort((left, right) => compareStrings(left.key, right.key));
+}
+
 function observationToEvidence(observation: ObservationInit): Evidence {
   const metadata = isRecord(observation.evidence)
     ? observation.evidence
@@ -966,32 +1142,329 @@ function observationToEvidence(observation: ObservationInit): Evidence {
       ? undefined
       : { evidence: observation.evidence };
   const message = isRecord(observation.evidence)
-    ? (stringFromUnknown(observation.evidence.message) ??
-      stringFromUnknown(observation.evidence.stage) ??
-      stringFromUnknown(observation.evidence.instruction))
+    ? structuredEvidenceMessage(observation.evidence)
     : stringFromUnknown(observation.evidence);
+  const snippet = isRecord(observation.evidence)
+    ? (stringFromUnknown(observation.evidence.snippet) ??
+      stringFromUnknown(observation.evidence.instruction))
+    : observation.location?.snippet;
 
   return omitUndefined({
+    location: observation.location?.location ?? {
+      file: observation.location?.file,
+      line: observation.location?.line,
+      endLine: observation.location?.endLine,
+    },
     file: observation.location?.file,
     line: observation.location?.line,
     endLine: observation.location?.endLine,
+    label: observation.location?.label ?? message,
     message: observation.location?.message ?? message,
-    snippet: observation.location?.snippet,
+    snippet,
+    data: metadata,
     metadata,
   });
 }
 
-function summarizeObservationGroup(first: ObservationInit, count: number): string {
-  const recommendation =
-    typeof first.recommendation === "string" ? undefined : first.recommendation?.summary;
-  if (count === 1) {
-    return recommendation ?? first.title;
+function structuredEvidenceMessage(evidence: Record<string, unknown>): string | undefined {
+  const explicitMessage = stringFromUnknown(evidence.message);
+  if (explicitMessage !== undefined) {
+    return explicitMessage;
   }
-  return `${count} related observations were reported for ${first.subject}.`;
+
+  const stage = stringFromUnknown(evidence.stage);
+  if (stage !== undefined) {
+    return `${stage} stage`;
+  }
+
+  const label = stringFromUnknown(evidence.label) ?? stringFromUnknown(evidence.name);
+  if (label !== undefined) {
+    return label;
+  }
+
+  return stringFromUnknown(evidence.summary) ?? stringFromUnknown(evidence.instruction);
 }
 
-function defaultObservationGroupKey(observation: ObservationInit): string {
-  return `${observation.ruleId}:${observation.subject}:${observation.category}`;
+function synthesizeObservationTitle(
+  title: ObservationTitle,
+  count: number,
+  groupedTitle: string | undefined,
+): string {
+  if (typeof title === "string") {
+    return count > 1 && groupedTitle !== undefined ? groupedTitle : title;
+  }
+  return count > 1 ? title.plural : title.singular;
+}
+
+function summarizeObservationGroup(group: ObservationInit[]): string {
+  const first = group[0];
+  if (first === undefined) {
+    throw new Error("Cannot summarize an empty observation group.");
+  }
+
+  if (first.summary !== undefined) {
+    if (typeof first.summary === "string") {
+      return normalizeParagraph(renderObservationTemplate(first.summary, group));
+    }
+    const template = group.length > 1 ? first.summary.grouped : first.summary.singular;
+    if (template !== undefined) {
+      return normalizeParagraph(renderObservationTemplate(template, group));
+    }
+  }
+
+  const recommendation =
+    typeof first.recommendation === "string" ? undefined : first.recommendation?.summary;
+  if (group.length === 1) {
+    return recommendation ?? synthesizeObservationTitle(first.title, 1, first.groupedTitle);
+  }
+  return `${group.length} related observations were reported for ${first.subject}.`;
+}
+
+function synthesizeRecommendation(group: ObservationInit[]): string {
+  const recommendations = uniqueStrings(
+    group.flatMap((observation) => {
+      if (typeof observation.recommendation === "string") {
+        return [observation.recommendation];
+      }
+      if (observation.recommendation !== undefined) {
+        return [
+          joinRecommendation(
+            observation.recommendation.summary,
+            observation.recommendation.details,
+          ),
+        ];
+      }
+      return [];
+    }),
+  );
+
+  return recommendations.map(normalizeParagraph).join("\n\n");
+}
+
+function joinRecommendation(summary: string, details: string | undefined): string {
+  if (!isNonEmptyString(details)) {
+    return summary;
+  }
+
+  const compactSummary = trimTrailingSentencePunctuation(summary);
+  const compactDetails = trimTrailingSentencePunctuation(details);
+
+  if (/^use\s+/i.test(compactDetails)) {
+    return `${compactSummary} and ${lowercaseFirst(compactDetails)}.`;
+  }
+
+  return `${compactSummary}. ${compactDetails}.`;
+}
+
+function defaultObservationGroupKey(
+  observation: ObservationInit,
+  rule: RuleDefinition | undefined,
+): string {
+  const groupBy = observation.groupBy ?? rule?.groupBy;
+  if (groupBy !== undefined && groupBy.length > 0) {
+    return groupBy
+      .map((field) => `${field}:${stringFromUnknown(observationValue(observation, field)) ?? ""}`)
+      .join("|");
+  }
+  return `${observation.ruleId}:${observation.subject}:${observation.category ?? rule?.category ?? "general"}`;
+}
+
+function renderObservationTemplate(template: string, group: ObservationInit[]): string {
+  const values = observationTemplateValues(group);
+  return template.replace(/\{([a-zA-Z][a-zA-Z0-9_]*)\}/g, (match, key: string) => {
+    return values[key] ?? match;
+  });
+}
+
+function observationTemplateValues(group: ObservationInit[]): Record<string, string> {
+  const first = group[0];
+  const subjects = uniqueStrings(group.map((observation) => observation.subject));
+  const stages = uniqueStrings(group.map(extractStage).filter(isNonEmptyString));
+  const locations = uniqueStrings(group.map(formatObservationLocation).filter(isNonEmptyString));
+
+  return omitUndefined({
+    count: numberWord(group.length),
+    location: locations[0],
+    locations: joinHumanList(locations),
+    subject: first?.subject,
+    subjects: joinHumanList(subjects),
+    stage: stages[0],
+    stages: joinHumanList(stages),
+  });
+}
+
+function observationValue(observation: ObservationInit, field: string): unknown {
+  if (field.includes(".")) {
+    return field.split(".").reduce<unknown>((value, part) => {
+      return isRecord(value) ? value[part] : undefined;
+    }, observation);
+  }
+  return (observation as unknown as Record<string, unknown>)[field];
+}
+
+function extractStage(observation: ObservationInit): string | undefined {
+  if (isRecord(observation.evidence)) {
+    const explicit = stringFromUnknown(observation.evidence.stage);
+    if (explicit !== undefined) {
+      return explicit;
+    }
+    const label = stringFromUnknown(observation.evidence.label);
+    if (label !== undefined) {
+      return trimTrailingWord(label, "stage");
+    }
+  }
+
+  return trimTrailingWord(observation.location?.label, "stage");
+}
+
+function formatObservationLocation(observation: ObservationInit): string | undefined {
+  if (observation.location?.file === undefined) {
+    return undefined;
+  }
+  if (observation.location.line === undefined) {
+    return observation.location.file;
+  }
+  return `${observation.location.file}:${observation.location.line}`;
+}
+
+function joinHumanList(values: string[]): string {
+  if (values.length <= 2) {
+    return values.join(" and ");
+  }
+  return `${values.slice(0, -1).join(", ")}, and ${values.at(-1)}`;
+}
+
+function highestRisk(findings: ReviewFinding[]): ReviewAssessment["risk"] {
+  const severity = highestFindingSeverity(findings);
+  if (severity === Severity.Info) {
+    return "none";
+  }
+  return severity;
+}
+
+function highestFindingSeverity(findings: ReviewFinding[]): Severity {
+  return aggregateSeverity(
+    findings.map((finding) => finding.severity),
+    "highest",
+  );
+}
+
+function findingConcern(finding: ReviewFinding): string {
+  return lowercaseFirst(trimTrailingSentencePunctuation(finding.title));
+}
+
+function improvementPhrase(finding: ReviewFinding): string {
+  const recommendation = recommendationSubject(finding.recommendation);
+  if (recommendation !== undefined) {
+    return recommendation;
+  }
+
+  return `Addressing ${findingConcern(finding)}`;
+}
+
+function recommendationSubject(recommendation: string | undefined): string | undefined {
+  if (recommendation === undefined) {
+    return undefined;
+  }
+
+  const normalized = trimTrailingSentencePunctuation(normalizeParagraph(recommendation));
+  const pinDigest = normalized.match(/\bpin\b.*\bby digest\b/i);
+  if (pinDigest !== null) {
+    return "Digest pinning";
+  }
+
+  const firstClause = normalized.split(/\s+(?:and|when|where|with)\s+/i)[0]?.trim();
+  if (!isNonEmptyString(firstClause)) {
+    return undefined;
+  }
+
+  return gerundPhrase(firstClause);
+}
+
+function gerundPhrase(phrase: string): string {
+  const words = phrase.split(/\s+/);
+  const first = words[0];
+  if (first === undefined) {
+    return phrase;
+  }
+
+  return capitalize([toGerund(first), ...words.slice(1)].join(" "));
+}
+
+function toGerund(verb: string): string {
+  const lower = verb.toLowerCase();
+  const irregular: Record<string, string> = {
+    run: "running",
+    use: "using",
+  };
+  const known = irregular[lower];
+  if (known !== undefined) {
+    return known;
+  }
+  if (lower.endsWith("e") && !lower.endsWith("ee")) {
+    return `${lower.slice(0, -1)}ing`;
+  }
+  return `${lower}ing`;
+}
+
+function highSignalSemanticTokens(value: string): string[] {
+  return value
+    .split(" ")
+    .map(canonicalSemanticToken)
+    .filter((word) => highSignalReviewTerms.has(word));
+}
+
+function canonicalSemanticToken(value: string): string {
+  if (value === "stages") {
+    return "stage";
+  }
+  if (value === "artifacts") {
+    return "artifact";
+  }
+  return trimTrailingWord(trimTrailingWord(value, "ing"), "ed") ?? value;
+}
+
+function normalizeSemanticText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .split(/\s+/)
+    .filter((word) => word.length > 0 && !semanticStopWords.has(word))
+    .join(" ");
+}
+
+function trimTrailingWord(value: string | undefined, word: string): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const pattern = new RegExp(`\\s+${word}$`, "i");
+  const trimmed = value.replace(pattern, "").trim();
+  return trimmed.length > 0 ? trimmed : value;
+}
+
+function numberWord(value: number): string {
+  return (
+    {
+      1: "One",
+      2: "Two",
+      3: "Three",
+      4: "Four",
+      5: "Five",
+      6: "Six",
+      7: "Seven",
+      8: "Eight",
+      9: "Nine",
+      10: "Ten",
+    }[value] ?? String(value)
+  );
+}
+
+function calibrateFindingSeverity(finding: ReviewFinding, policy: ReviewPolicy): ReviewFinding {
+  const override =
+    policy.severityOverrides?.[finding.ruleId ?? ""] ??
+    policy.severityOverrides?.[finding.groupKey ?? ""];
+
+  return override === undefined ? finding : { ...finding, severity: override };
 }
 
 function scoreFinding(finding: ReviewFinding): number {
@@ -1033,18 +1506,48 @@ function confidenceWeight(confidence: Confidence): number {
   }
 }
 
-function strongestSeverity(values: Severity[]): Severity {
-  return (
-    [...values].sort((left, right) => severityWeight(right) - severityWeight(left))[0] ??
-    Severity.Info
-  );
+function aggregateSeverity(values: Severity[], strategy: SeverityAggregation): Severity {
+  const sorted = [...values].sort((left, right) => severityWeight(right) - severityWeight(left));
+  if (strategy === "lowest") {
+    return sorted.at(-1) ?? Severity.Info;
+  }
+  return sorted[0] ?? Severity.Info;
 }
 
-function strongestConfidence(values: Confidence[]): Confidence {
+function aggregateConfidence(values: Confidence[], strategy: ConfidenceAggregation): Confidence {
+  if (values.length === 0) {
+    return Confidence.Low;
+  }
+
+  if (strategy === "minimum") {
+    return (
+      [...values].sort((left, right) => confidenceWeight(left) - confidenceWeight(right))[0] ??
+      Confidence.Low
+    );
+  }
+
+  if (strategy === "average") {
+    const average =
+      values.reduce((total, confidence) => total + confidenceNumericValue(confidence), 0) /
+      values.length;
+    return normalizeConfidence(average);
+  }
+
   return (
     [...values].sort((left, right) => confidenceWeight(right) - confidenceWeight(left))[0] ??
     Confidence.Low
   );
+}
+
+function confidenceNumericValue(confidence: Confidence): number {
+  switch (confidence) {
+    case Confidence.High:
+      return 0.95;
+    case Confidence.Medium:
+      return 0.72;
+    case Confidence.Low:
+      return 0.3;
+  }
 }
 
 function stableId(value: string): string {
@@ -1075,14 +1578,29 @@ function uniqueStrings(values: string[]): string[] {
 function assertObservationInit(value: ObservationInit, source: string): void {
   requireString(value.ruleId, `${source}.ruleId`);
   requireString(value.subject, `${source}.subject`);
-  requireString(value.title, `${source}.title`);
-  requireString(value.category, `${source}.category`);
-  if (!isSeverity(value.severity)) {
+  requireObservationTitle(value.title, `${source}.title`);
+  const rule = ruleRegistry.lookup(value.ruleId);
+  if (value.category === undefined && rule?.category === undefined) {
+    throw new Error(`${source}.category is required when rule.category is not defined.`);
+  }
+  optionalString(value.category, `${source}.category`);
+  if (value.severity === undefined && rule?.defaultSeverity === undefined) {
+    throw new Error(`${source}.severity is required when rule.defaultSeverity is not defined.`);
+  }
+  if (value.severity !== undefined && !isSeverity(value.severity)) {
     throw new Error(`${source}.severity must be one of info, low, medium, high, critical.`);
   }
-  normalizeConfidence(value.confidence);
+  const ruleConfidence = rule?.defaultConfidence;
+  if (value.confidence === undefined && ruleConfidence === undefined) {
+    throw new Error(`${source}.confidence is required when rule.defaultConfidence is not defined.`);
+  }
+  if (value.confidence !== undefined) {
+    normalizeConfidence(value.confidence);
+  }
+  optionalObservationSummary(value.summary, `${source}.summary`);
   optionalEvidence(value.location, `${source}.location`);
   optionalString(value.groupKey, `${source}.groupKey`);
+  optionalStringArray(value.groupBy, `${source}.groupBy`);
   optionalStringArray(value.tags, `${source}.tags`);
 }
 
@@ -1116,6 +1634,18 @@ function assertReviewNote(value: ReviewNote, source: string): void {
   }
 }
 
+function assertReviewScore(value: ReviewScore): void {
+  requireString(value.key, "ctx.review.score.key");
+  if (typeof value.score !== "number" || Number.isNaN(value.score)) {
+    throw new Error("ctx.review.score.score must be a number.");
+  }
+  if (value.max !== undefined && (typeof value.max !== "number" || Number.isNaN(value.max))) {
+    throw new Error("ctx.review.score.max must be a number.");
+  }
+  optionalString(value.label, "ctx.review.score.label");
+  optionalString(value.summary, "ctx.review.score.summary");
+}
+
 function assertAssessment(value: ReviewAssessment): void {
   if (!["none", "low", "medium", "high", "critical"].includes(value.risk)) {
     throw new Error("ctx.review.assessment.risk must be one of none, low, medium, high, critical.");
@@ -1125,6 +1655,48 @@ function assertAssessment(value: ReviewAssessment): void {
 
 function assertOpinion(value: ReviewOpinion): void {
   requireString(value.summary, "ctx.review.opinion.summary");
+}
+
+function assertRuleDefinition(rule: RuleDefinition): void {
+  requireString(rule.id, "rule.id");
+  optionalString(rule.category, "rule.category");
+  if (rule.defaultSeverity !== undefined && !isSeverity(rule.defaultSeverity)) {
+    throw new Error("rule.defaultSeverity must be one of info, low, medium, high, critical.");
+  }
+  if (rule.defaultConfidence !== undefined) {
+    normalizeConfidence(rule.defaultConfidence);
+  }
+  optionalStringArray(rule.groupBy, "rule.groupBy");
+  if (rule.aggregate !== undefined && typeof rule.aggregate !== "function") {
+    throw new Error("rule.aggregate must be a function.");
+  }
+}
+
+function requireObservationTitle(value: ObservationTitle, field: string): void {
+  if (typeof value === "string") {
+    requireString(value, field);
+    return;
+  }
+  if (!isRecord(value)) {
+    throw new Error(`${field} must be a string or { singular, plural }.`);
+  }
+  requireString(value.singular, `${field}.singular`);
+  requireString(value.plural, `${field}.plural`);
+}
+
+function optionalObservationSummary(value: ObservationSummary | undefined, field: string): void {
+  if (value === undefined) {
+    return;
+  }
+  if (typeof value === "string") {
+    optionalString(value, field);
+    return;
+  }
+  if (!isRecord(value)) {
+    throw new Error(`${field} must be a string or { singular, grouped }.`);
+  }
+  optionalString(value.singular, `${field}.singular`);
+  optionalString(value.grouped, `${field}.grouped`);
 }
 
 function optionalEvidence(value: Evidence | undefined, field: string): void {
@@ -1139,10 +1711,18 @@ function optionalEvidence(value: Evidence | undefined, field: string): void {
   optionalPositiveInteger(value.endLine, `${field}.endLine`);
   optionalString(value.message, `${field}.message`);
   optionalString(value.snippet, `${field}.snippet`);
+  optionalString(value.label, `${field}.label`);
 }
 
 function writeLog(level: "debug" | "info" | "warn" | "error", message: unknown): void {
   process.stderr.write(`[adversary] ${level}: ${String(message)}\n`);
+}
+
+function parseBooleanEnv(value: string | undefined): boolean | undefined {
+  if (value === undefined || value.length === 0) {
+    return undefined;
+  }
+  return ["1", "true", "TRUE", "yes", "YES"].includes(value);
 }
 
 function isVerbose(): boolean {
@@ -1222,25 +1802,85 @@ function capitalize(value: string): string {
   return `${value.slice(0, 1).toUpperCase()}${value.slice(1)}`;
 }
 
+const semanticStopWords = new Set([
+  "a",
+  "an",
+  "and",
+  "are",
+  "as",
+  "from",
+  "in",
+  "is",
+  "of",
+  "the",
+  "to",
+  "uses",
+  "using",
+]);
+
+const highSignalReviewTerms = new Set([
+  "artifact",
+  "builder",
+  "digest",
+  "multi",
+  "runtime",
+  "stage",
+]);
+
 function formatEvidenceLocation(evidence: Evidence): string {
-  if (evidence.file === undefined) {
+  const file = evidence.location?.file ?? evidence.file;
+  const line = evidence.location?.line ?? evidence.line;
+  const endLine = evidence.location?.endLine ?? evidence.endLine;
+
+  if (file === undefined) {
     return "";
   }
-  if (evidence.line !== undefined && evidence.endLine !== undefined) {
-    return `${evidence.file}:${evidence.line}-${evidence.endLine}`;
+  if (line !== undefined && endLine !== undefined) {
+    return `${file}:${line}-${endLine}`;
   }
-  if (evidence.line !== undefined) {
-    return `${evidence.file}:${evidence.line}`;
+  if (line !== undefined) {
+    return `${file}:${line}`;
   }
-  return evidence.file;
+  return file;
 }
 
-function formatEvidence(evidence: Evidence): string {
+function formatEvidenceLines(evidence: Evidence): string[] {
   const location = formatEvidenceLocation(evidence);
-  if (location.length > 0 && evidence.message !== undefined) {
-    return `${location} - ${evidence.message}`;
+  const label = evidence.label ?? evidence.message;
+  const firstLine =
+    location.length > 0 && label !== undefined
+      ? `- ${location} — ${label}`
+      : `- ${location.length > 0 ? location : (label ?? "Evidence")}`;
+  const lines = [firstLine];
+
+  if (evidence.snippet !== undefined) {
+    lines.push(`  ${evidence.snippet}`);
   }
-  return location.length > 0 ? location : (evidence.message ?? evidence.snippet ?? "Evidence");
+
+  return lines;
+}
+
+function formatScore(score: ReviewScore): string {
+  const label = score.label ?? score.key;
+  const max = score.max ?? 10;
+  const summary = score.summary === undefined ? "" : ` - ${normalizeParagraph(score.summary)}`;
+  return `${label}: ${score.score} / ${max}${summary}`;
+}
+
+function normalizeParagraph(value: string): string {
+  return value
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .join(" ");
+}
+
+function trimTrailingSentencePunctuation(value: string): string {
+  return value.trim().replace(/[.!?]+$/g, "");
+}
+
+function lowercaseFirst(value: string): string {
+  return `${value.slice(0, 1).toLowerCase()}${value.slice(1)}`;
 }
 
 function omitUndefined<T extends Record<string, unknown>>(value: T): T {

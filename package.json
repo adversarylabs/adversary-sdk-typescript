@@ -19,8 +19,9 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "test": "vitest run",
+    "clean": "rm -rf dist",
+    "build": "npm run clean && tsc -p tsconfig.json",
+    "test": "npm run build && vitest run",
     "lint": "biome check .",
     "format": "biome check --write ."
   },
