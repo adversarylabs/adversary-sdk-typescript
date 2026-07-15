@@ -9,10 +9,27 @@ and write runtime output.
 ## Install
 
 ```bash
-npm install @adversarylabs/sdk
+npm install @adversarylabs/sdk@^0.1.5
 ```
 
 Requires Node 22 or newer and ESM.
+
+## Migrating from 0.1.4
+
+SDK 0.1.4 output is incompatible with the current strict Adversary CLI schema. Version 0.1.5 is
+the canonical protocol release. Existing adversaries should:
+
+1. Upgrade the package to `@adversarylabs/sdk@^0.1.5`.
+2. Set `findings.format` to `adversary.review.v1` in `adversary.yaml`.
+3. Stop reading `result.schemaVersion`; protocol selection is expressed by `protocolVersion: 1`
+   and the manifest format.
+4. If consuming serialized evidence, read `file`, `line`, `endLine`, `message`, `snippet`, and
+   `metadata` instead of `location`, `label`, and `data`.
+5. If consuming review scores, read the canonical review observation with key `score.<score-key>`;
+   the complete authored score is preserved in that note's metadata.
+
+There is no compatibility adapter or dual wire format. Output is validated against the strict
+`adversary.review.v1` schema before it is written.
 
 ## Author an adversary
 
@@ -287,7 +304,10 @@ ctx.review.score({
 });
 ```
 
-Scores are optional. They are included in JSON and rendered in terminal output when present.
+Scores are optional and remain available as an authoring API and terminal section. Because the CLI
+schema has no top-level score collection, the SDK serializes each score as a review
+observation. The note key is `score.<score-key>`, its summary is the rendered score, and its metadata
+preserves the authored `key`, `label`, `score`, `max`, and `summary`. No score data is discarded.
 
 ### Observation-First Authoring
 
@@ -325,10 +345,9 @@ type ReviewResult = {
   assessment?: { risk: "none" | "low" | "medium" | "high" | "critical"; summary?: string };
   positives: ReviewNote[];
   observations: ReviewNote[];
-  scores?: ReviewScore[];
   findings: ReviewFinding[];
   opinion?: { ship?: boolean; summary: string };
-  suppressed: { findings: number };
+  suppressed: { observations: number; findings: number };
   timing?: { totalMs?: number };
 };
 ```
@@ -336,12 +355,28 @@ type ReviewResult = {
 Renderers consume this result. The SDK includes `TerminalRenderer` and `JsonRenderer`:
 
 ```ts
-const result = await app.run({ });
+const result = await app.run({ input: { source: { path: "/repo" } } });
 new TerminalRenderer().render(result);
 new JsonRenderer().render(result);
 ```
 
 Adversary implementations should not manually format review output.
+
+### Canonical wire evidence
+
+The authoring API continues to accept nested `location`, structured `data`, and `label`. Envelope
+serialization translates those fields without losing their meaning:
+
+| Authoring field | Canonical wire field |
+| --- | --- |
+| `location.file` | `file` |
+| `location.line` | `line` |
+| `location.endLine` | `endLine` |
+| `data` | `metadata` |
+| `label` when `message` is absent | `message` |
+
+Wire evidence never contains `location`, `data`, or `label`. Findings likewise never contain SDK
+diagnostic fields such as `synthesisSource`.
 
 ## Comment Sentence Example
 
@@ -374,7 +409,7 @@ permissions:
   env: []
 
 findings:
-  format: adversary.run.v1
+  format: adversary.review.v1
 ```
 
 `src/index.ts`:
@@ -512,7 +547,6 @@ Output shape:
 {
   "protocolVersion": 1,
   "result": {
-    "schemaVersion": "adversary.review.v1",
     "adversary": {
       "name": "adversarylabs/example"
     },
@@ -524,11 +558,16 @@ Output shape:
     "observations": [],
     "findings": [],
     "suppressed": {
+      "observations": 0,
       "findings": 0
     }
   }
 }
 ```
+
+The package exports the exact CLI schema at
+`@adversarylabs/sdk/schemas/adversary.review.v1`. `writeOutput(...)` and
+`runFromEnvironment(...)` validate the complete envelope against that schema before writing.
 
 ## Development
 

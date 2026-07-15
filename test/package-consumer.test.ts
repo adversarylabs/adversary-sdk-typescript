@@ -36,7 +36,19 @@ describe("packed package consumer", () => {
       [
         "--input-type=module",
         "-e",
-        'import { Adversary } from "@adversarylabs/sdk"; console.log(typeof Adversary)',
+        `import { Adversary, validateRunEnvelope } from "@adversarylabs/sdk";
+await validateRunEnvelope({
+  protocolVersion: 1,
+  result: {
+    adversary: { name: "consumer" },
+    target: {},
+    positives: [],
+    observations: [],
+    findings: [],
+    suppressed: { observations: 0, findings: 0 },
+  },
+});
+console.log(typeof Adversary);`,
       ],
       { cwd: consumerDirectory },
     );
@@ -62,7 +74,7 @@ describe("packed package consumer", () => {
       cwd: consumerDirectory,
     });
 
-    for (const subpath of ["adversary.input.v1", "adversary.run.v1"]) {
+    for (const subpath of ["adversary.input.v1", "adversary.review.v1"]) {
       const resolved = await execFileAsync(
         process.execPath,
         [
