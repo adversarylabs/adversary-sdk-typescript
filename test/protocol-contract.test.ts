@@ -65,7 +65,8 @@ describe("published run protocol", () => {
           summary: `${observations.length} rich observations were aggregated.`,
           evidence: [
             {
-              location: { file: "src/index.ts", line: 4, endLine: 5 },
+              location: { file: "src/index.ts", line: 4 },
+              endLine: 5,
               label: "parser evidence",
               data: { parser: "typescript", direct: true },
               snippet: "const app = new Adversary();",

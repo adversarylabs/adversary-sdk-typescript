@@ -1185,11 +1185,18 @@ function deduplicateEvidence(evidence: ReadonlyArray<EvidenceInput | Evidence>):
 
 function normalizeEvidence(input: EvidenceInput | Evidence): Evidence {
   const legacy = input as EvidenceInput;
-  const location =
-    legacy.location ??
-    (legacy.file !== undefined || legacy.line !== undefined || legacy.endLine !== undefined
-      ? omitUndefined({ file: legacy.file, line: legacy.line, endLine: legacy.endLine })
-      : undefined);
+  const hasLocation =
+    legacy.location !== undefined ||
+    legacy.file !== undefined ||
+    legacy.line !== undefined ||
+    legacy.endLine !== undefined;
+  const location = hasLocation
+    ? omitUndefined({
+        file: legacy.location?.file ?? legacy.file,
+        line: legacy.location?.line ?? legacy.line,
+        endLine: legacy.location?.endLine ?? legacy.endLine,
+      })
+    : undefined;
   return omitUndefined({
     location,
     label: input.label,
