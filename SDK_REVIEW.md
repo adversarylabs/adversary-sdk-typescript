@@ -3,6 +3,10 @@
 Date: 2026-07-10  
 Reviewed version: `@adversarylabs/sdk@0.1.3`
 
+> This document preserves the original 0.1.3 review. The 0.1.5 protocol correction supersedes its
+> earlier wire-contract decisions: the package now emits only the strict CLI
+> `adversary.review.v1` envelope, with flat canonical evidence and no nested result version field.
+
 ## Executive assessment
 
 The SDK is usable today for first-party, Node 22+ ESM adversaries. A clean install from npm imports
@@ -28,12 +32,12 @@ before inviting third-party adversary authors or declaring a stable v1 API.
 
 | Review item | Status | Branch/PR | Notes |
 | --- | --- | --- | --- |
-| Wire schema mismatch | Complete | `sdk/protocol-schema-v1` | Canonical `adversary.run.v1` envelope schema; result schema is `adversary.review.v1` |
+| Wire schema mismatch | Complete | `sdk-strict-cli-protocol-0.1.5` | Exact CLI `adversary.review.v1` envelope and schema; protocol version 1 |
 | Docker policy in core | Complete | `sdk/domain-boundary` | Generic synthesis now uses authored summaries, recommendations, and stable note keys only |
 | Global rule registry | Complete | `sdk/instance-rule-registry` | Instance registries, duplicate rejection, explicit replacement, deprecated global compatibility |
-| Evidence model and deduplication | Complete | `sdk/evidence-model` | Canonical nested locations and `data`; compatibility normalization; opt-out honored |
+| Evidence model and deduplication | Complete | `sdk-strict-cli-protocol-0.1.5` | Rich author inputs translate to flat CLI evidence and `metadata`; opt-out honored |
 | Runtime API side effects | Complete | `sdk/runtime-api-separation` | Pure `run({ input })`; environment parsing and output writing live in `runFromEnvironment()` |
-| Validation and result semantics | Complete | `sdk/model-validation` | Policies, aggregate results, scores, evidence, and remediation validated; timing opt-in |
+| Validation and result semantics | Complete | `sdk-strict-cli-protocol-0.1.5` | Complete envelopes validated before writes; scores translate to canonical notes |
 | npm package hardening | Complete | `sdk/package-hardening` | Self-building tarball, clean JS/TS consumer test, metadata, license, usable maps, Node 22/24 CI |
 | Starter template and tooling | Complete | `sdk/starter-template` | Visible SDK result, reproducible non-root container, lockfile, and vulnerability-free dev tooling |
 
@@ -49,8 +53,8 @@ before inviting third-party adversary authors or declaring a stable v1 API.
 
 ## What is already strong
 
-- **Small consumer footprint.** The published package has zero production dependencies. The
-  production-only npm audit is clean.
+- **Small consumer footprint.** The package has one production dependency, Ajv, to validate the
+  exact shipped CLI schema before writing. The production-only npm audit is clean.
 - **Modern module configuration.** ESM is explicit, TypeScript uses `NodeNext`, and the root and
   schema entry points are declared through `exports`. Node recommends `exports` for new packages
   because it defines and encapsulates the supported entry points.
@@ -71,10 +75,9 @@ before inviting third-party adversary authors or declaring a stable v1 API.
 
 ### 1. Align the published schema, manifest, and runtime envelope
 
-**Status: Complete on `sdk/protocol-schema-v1`.** The run envelope is canonical, the nested result
-has its own schema version, bundled manifests name `adversary.run.v1`, and a packed-schema contract
-test validates real runtime output. The legacy schema export was removed because it described no
-current runtime object.
+**Status: Complete on `sdk-strict-cli-protocol-0.1.5`.** The run envelope and bundled schema are
+byte-for-byte aligned with the CLI `adversary.review.v1` contract. Bundled manifests name that
+format, protocol version 1 selects the contract, and the result has no separate version property.
 
 The exported [`adversary.findings.v1` schema](./schemas/adversary.findings.v1.schema.json#L7)
 requires this legacy shape:
@@ -187,8 +190,9 @@ not only different evidence.
 
 ### 5. Choose one canonical evidence-location model
 
-**Status: Complete on `sdk/evidence-model`.** Runtime output uses nested `location` and one `data`
-payload. Legacy top-level locations and `metadata` remain accepted only as normalized `0.x` inputs.
+**Status: Complete on `sdk-strict-cli-protocol-0.1.5`.** Authoring retains rich nested locations,
+labels, and data. Wire serialization translates them to flat location fields, message, and
+metadata, and never emits the internal authoring shape.
 
 [`Evidence`](./src/index.ts#L67) permits both:
 
@@ -260,9 +264,9 @@ app rule ID and observation rule ID so authors can act on them.
 
 ### 8. Make result fields meaningful or remove them
 
-**Status: Complete on `sdk/model-validation`.** Summary exposes only `files_scanned`, the permanently
-zero observation suppression count is removed, and nondeterministic timing is emitted only when
-`includeTiming` is explicitly enabled.
+**Status: Complete on `sdk-strict-cli-protocol-0.1.5`.** Summary exposes only `files_scanned`,
+duplicate observations are counted in the CLI-required suppression field, and nondeterministic
+timing is emitted only when `includeTiming` is explicitly enabled.
 
 - [`ctx.summary`](./src/index.ts#L245) accepts arbitrary fields, but only `files_scanned` is copied
   into `ReviewResult`.

@@ -9,7 +9,6 @@ import {
   Adversary,
   Confidence,
   JsonRenderer,
-  REVIEW_RESULT_SCHEMA_VERSION,
   Severity,
   TerminalRenderer,
   createAdversaryRunEnvelope,
@@ -154,13 +153,15 @@ describe("Adversary", () => {
     const directory = await mkdtemp(join(tmpdir(), "adversary-sdk-"));
     const outputPath = join(directory, "output.json");
     const output = {
-      schemaVersion: REVIEW_RESULT_SCHEMA_VERSION,
-      adversary: { name: "adversarylabs/test" },
-      target: { filesScanned: 1 },
-      positives: [],
-      observations: [],
-      findings: [],
-      suppressed: { findings: 0 },
+      protocolVersion: 1 as const,
+      result: {
+        adversary: { name: "adversarylabs/test" },
+        target: { filesScanned: 1 },
+        positives: [],
+        observations: [],
+        findings: [],
+        suppressed: { observations: 0, findings: 0 },
+      },
     };
 
     await writeOutput(output, outputPath);
@@ -170,21 +171,21 @@ describe("Adversary", () => {
 
   it("creates protocol v1 run envelopes for runtime output", async () => {
     const result = {
-      schemaVersion: REVIEW_RESULT_SCHEMA_VERSION,
       adversary: { name: "adversarylabs/test" },
       target: { repository: "/repo" },
       positives: [],
       observations: [],
       findings: [],
-      suppressed: { findings: 0 },
+      suppressed: { observations: 0, findings: 0 },
     };
 
     expect(ADVERSARY_RUN_PROTOCOL_VERSION).toBe(1);
-    expect(REVIEW_RESULT_SCHEMA_VERSION).toBe("adversary.review.v1");
-    expect(createAdversaryRunEnvelope(result)).toEqual({
+    const envelope = createAdversaryRunEnvelope(result);
+    expect(envelope).toEqual({
       protocolVersion: 1,
       result,
     });
+    expect(envelope.result).not.toHaveProperty("schemaVersion");
   });
 
   it("uses CLI environment defaults through the runtime adapter", async () => {
@@ -235,10 +236,7 @@ describe("Adversary", () => {
     expect(result.findings).toHaveLength(1);
     expect(result.suppressed.findings).toBe(1);
     expect(result.suppressedFindings).toHaveLength(1);
-    expect(written).toEqual({
-      protocolVersion: 1,
-      result,
-    });
+    expect(written).toEqual(createAdversaryRunEnvelope(result));
   });
 
   it("keeps programmatic runs independent of environment paths", async () => {
@@ -410,7 +408,6 @@ describe("review pipeline", () => {
       remediation: {
         complexity: "trivial",
       },
-      synthesisSource: "generic",
     });
     expect(output.findings[0]?.evidence.map((item) => item.message)).toEqual([
       "complete sentence",
@@ -695,7 +692,7 @@ describe("review pipeline", () => {
     expect(terminal).toContain("Overall assessment");
     expect(terminal).toContain("[info] Comments contain complete sentences");
     expect(terminal).not.toContain("Rules executed");
-    expect(JSON.parse(json)).toEqual(result);
+    expect(JSON.parse(json)).toEqual(createAdversaryRunEnvelope(result).result);
   });
 
   it("renders review-level scores, positives, observations, and tight opinion text", async () => {
@@ -806,7 +803,6 @@ describe("review pipeline", () => {
     expect(result.findings[0]?.title).toBe("Comments are complete sentences");
     expect(result.findings[0]?.severity).toBe("low");
     expect(result.findings[0]?.confidence).toBe("high");
-    expect(result.findings[0]?.synthesisSource).toBe("generic");
     expect(result.findings[0]?.summary).toBe("Three comments are written as complete sentences.");
     expect(result.findings[0]?.evidence.map((item) => item.message)).toEqual([
       "complete sentence",
@@ -939,7 +935,6 @@ describe("review pipeline", () => {
       severity: "low",
       confidence: "high",
       summary: "Three comments are complete sentences.",
-      synthesisSource: "rule",
     });
     expect(finding?.evidence.map((item) => item.location?.line)).toEqual([3, 11, 20]);
     expect(result.assessment?.summary).toBe(
@@ -1253,7 +1248,6 @@ describe("review pipeline", () => {
     expect(parsed.finding.title).toBe("Comments are complete sentences");
     expect(parsed.finding.confidence).toBe("high");
     expect(parsed.finding.summary).toBe("Three comments are complete sentences.");
-    expect(parsed.finding.synthesisSource).toBe("rule");
     expect(parsed.finding.evidence).toHaveLength(3);
   });
 
