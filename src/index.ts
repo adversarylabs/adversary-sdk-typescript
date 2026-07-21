@@ -2,6 +2,22 @@ import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { Ajv2020, type ValidateFunction } from "ajv/dist/2020.js";
 
+export {
+  ADVERSARY_MANIFEST_FILE_NAME,
+  ADVERSARY_MANIFEST_MAX_BYTES,
+  ManifestValidationError,
+  parseAdversaryManifest,
+  validateAdversaryManifest,
+  type AdversaryManifest,
+  type DetectionManifest,
+  type EnvironmentPermissionsManifest,
+  type FilesystemPermissionsManifest,
+  type FindingsManifest,
+  type PermissionsManifest,
+  type RuntimeManifest,
+  type TriggerManifest,
+} from "./manifest.js";
+
 export const DEFAULT_INPUT_PATH = "/adversary/input.json";
 export const DEFAULT_OUTPUT_PATH = "/adversary/output.json";
 export const ADVERSARY_RUN_PROTOCOL_VERSION = 1;
