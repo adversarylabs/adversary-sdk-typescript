@@ -44,6 +44,18 @@ describe("adversary manifest detection", () => {
     expect(manifest.detection).toBeUndefined();
   });
 
+  it("accepts and normalizes permissions.env from legacy SDK templates", () => {
+    const legacy = valid.replace("  environment:\n    allow: [CI]", "  env: [CI]");
+    const manifest = parseAdversaryManifest(legacy);
+    expect(manifest.permissions?.environment).toEqual({ allow: ["CI"] });
+    expect(manifest.permissions).not.toHaveProperty("env");
+  });
+
+  it("rejects ambiguous legacy and canonical environment permissions", () => {
+    const ambiguous = valid.replace("  environment:\n", "  env: [CI]\n  environment:\n");
+    expect(() => parseAdversaryManifest(ambiguous)).toThrow(ManifestValidationError);
+  });
+
   it("parses declarative file detection", () => {
     const manifest = parseAdversaryManifest(
       withDetection('  files:\n    - Dockerfile\n    - "**/*.dockerfile"'),
@@ -147,5 +159,32 @@ describe("adversary manifest detection", () => {
     ).toBe(true);
     expect(validate({ ...base, detection: {} })).toBe(false);
     expect(validate({ ...base, detection: { files: "Dockerfile" } })).toBe(false);
+    for (const entrypoint of [
+      "../detect.js",
+      "/tmp/detect.js",
+      "dist\\detect.js",
+      "dist/./detect.js",
+      "dist//detect.js",
+    ]) {
+      expect(validate({ ...base, detection: { entrypoint } }), entrypoint).toBe(false);
+    }
+  });
+
+  it("keeps legacy environment permissions valid in the published schema", async () => {
+    const schema = JSON.parse(
+      await readFile(
+        join(import.meta.dirname, "..", "schemas", "adversary.manifest.v1.schema.json"),
+        "utf8",
+      ),
+    );
+    const validate = new Ajv2020({ allErrors: true, strict: true }).compile(schema);
+    const manifest = parseAdversaryManifest(valid);
+    const { environment: _environment, ...legacyPermissions } = manifest.permissions ?? {};
+    expect(validate({ ...manifest, permissions: { ...legacyPermissions, env: ["CI"] } })).toBe(
+      true,
+    );
+    expect(validate({ ...manifest, permissions: { ...manifest.permissions, env: ["CI"] } })).toBe(
+      false,
+    );
   });
 });

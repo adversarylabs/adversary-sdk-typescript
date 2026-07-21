@@ -37,7 +37,7 @@
           "uniqueItems": true,
           "items": { "$ref": "#/$defs/normalizedString" }
         },
-        "entrypoint": { "$ref": "#/$defs/normalizedString" }
+        "entrypoint": { "$ref": "#/$defs/portableProjectPath" }
       }
     },
     "runtime": {
@@ -114,7 +114,24 @@
             }
           }
         },
+        "env": {
+          "description": "Deprecated alias for environment.allow.",
+          "deprecated": true,
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          }
+        },
         "enforcement": { "enum": ["advisory", "required"] }
+      },
+      "not": {
+        "properties": {
+          "environment": true,
+          "env": true
+        },
+        "required": ["environment", "env"]
       }
     },
     "findings": {
@@ -129,6 +146,10 @@
     "normalizedString": {
       "type": "string",
       "pattern": "^[^\\x00\\s](?:[^\\x00]*[^\\x00\\s])?$"
+    },
+    "portableProjectPath": {
+      "type": "string",
+      "pattern": "^(?!\\s)(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!(?:\\.{1,2})(?:/|$))(?!.*(?:/\\.{1,2})(?:/|$))(?!.*//)(?!.*\\s$)[^/]+(?:/[^/]+)*$"
     },
     "projectPath": {
       "type": "string",
