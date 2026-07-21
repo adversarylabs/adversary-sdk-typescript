@@ -2,6 +2,11 @@
 
 Minimal TypeScript Adversary built with `@adversarylabs/sdk`.
 
+## Automatic detection
+
+`adversary auto` selects this starter when TypeScript files change. Adjust `detection.files` in
+`adversary.yaml` to match the technology or domain your adversary reviews.
+
 ```bash
 npm ci
 npm test

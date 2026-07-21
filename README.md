@@ -393,6 +393,11 @@ triggers:
     - "*.ts"
     - "**/*.ts"
 
+detection:
+  files:
+    - "*.ts"
+    - "**/*.ts"
+
 runtime:
   name: node
   version: "22"
@@ -406,11 +411,44 @@ permissions:
     write:
       - .adversary/results
   network: false
-  env: []
+  environment:
+    allow: []
 
 findings:
   format: adversary.review.v1
 ```
+
+### Automatic detection
+
+The SDK owns the canonical `adversary.yaml` model, parser, validation, and published JSON schema.
+The CLI uses the parsed optional `detection` section when deciding which installed adversaries are
+relevant to `adversary auto`.
+
+Use declarative file detection when changed repository-relative paths are sufficient:
+
+```yaml
+detection:
+  files:
+    - Dockerfile
+    - "**/Dockerfile"
+    - .dockerignore
+```
+
+Use a detector entrypoint when applicability requires lightweight repository or change inspection:
+
+```yaml
+detection:
+  entrypoint: dist/detect.js
+```
+
+Both forms may be declared together. The entrypoint is validated as a portable project-relative
+path, but its build output does not need to exist while the manifest is parsed. Detector execution
+and matching behavior belong to the CLI/runtime and are not implemented by this SDK feature.
+
+Use `parseAdversaryManifest(...)` to parse YAML or `validateAdversaryManifest(...)` to validate an
+already-decoded value. The resulting `AdversaryManifest` exposes `detection` directly, so consumers
+never need to re-read raw YAML. The schema is published as
+`@adversarylabs/sdk/schemas/adversary.manifest.v1`.
 
 `src/index.ts`:
 

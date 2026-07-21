@@ -8,6 +8,11 @@ triggers:
     - "*.ts"
     - "**/*.ts"
 
+detection:
+  files:
+    - "*.ts"
+    - "**/*.ts"
+
 runtime:
   name: node
   version: "22"
@@ -21,7 +26,8 @@ permissions:
     write:
       - .adversary/results
   network: false
-  env: []
+  environment:
+    allow: []
 
 findings:
   format: adversary.review.v1
