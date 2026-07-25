@@ -1588,6 +1588,10 @@ describe("review pipeline", () => {
         key: "stage-layout",
         summary: "Commands share a root error mapper.",
       });
+      ctx.review.observe({
+        key: "migration-lint",
+        summary: "Prepared migration file has syntax errors.",
+      });
       ctx.finding({
         title: "Command code terminates the process directly",
         category: "correctness",
@@ -1617,10 +1621,63 @@ describe("review pipeline", () => {
     expect(terminal).toContain("- [high] Command code terminates the process directly (7 sites)");
     expect(terminal).toContain("- … and 2 more");
     expect(terminal).toContain("Commands share a root error mapper.");
+    expect(terminal).toContain("Prepared migration file has syntax errors.");
     expect(terminal).not.toContain("Prepared 436 Go CLI files");
     expect(terminal).not.toContain("Internal prep note");
     expect(terminal).not.toContain("site 6");
     expect(terminal).not.toContain("Scan complete");
+  });
+
+  it("keeps suppressed finding details out of the active findings index and total", async () => {
+    const app = new Adversary({
+      name: "suppression-review",
+      review: { minimumConfidence: "high", maximumFindings: 1 },
+    });
+    app.rule("findings", (ctx) => {
+      ctx.finding({
+        title: "Visible finding",
+        category: "policy",
+        severity: "high",
+        confidence: "high",
+        summary: "Active finding.",
+        evidence: [{ file: "a.ts", line: 1 }],
+      });
+      ctx.finding({
+        title: "Suppressed by maximum findings",
+        category: "policy",
+        severity: "medium",
+        confidence: "high",
+        summary: "Would be hidden without includeSuppressed.",
+        evidence: [{ file: "b.ts", line: 2 }],
+      });
+    });
+
+    const result = await app.run({
+      input: { source: { path: "/repo" } },
+      includeSuppressed: true,
+    });
+    let terminal = "";
+    new TerminalRenderer((text) => {
+      terminal += text;
+    }).render(result);
+
+    expect(result.findings).toHaveLength(1);
+    expect(result.suppressedFindings?.length).toBeGreaterThan(0);
+    expect(terminal).toContain("Findings (1)");
+    expect(terminal).toContain("- [high] Visible finding");
+    expect(terminal).toContain("Suppressed findings (1)");
+    expect(terminal).toContain(
+      "[medium; suppressed; reason unavailable] Suppressed by maximum findings",
+    );
+    expect(terminal).toContain("Findings: 1");
+    expect(terminal).toContain("Suppressed findings: 1");
+
+    const activeIndex = terminal.slice(
+      terminal.indexOf("Findings (1)"),
+      terminal.indexOf("Suppressed findings (1)"),
+    );
+    expect(activeIndex).toContain("- [high] Visible finding (1 site)");
+    expect(activeIndex).not.toContain("Suppressed by maximum findings");
   });
 
   it("uses the rule aggregate through the built package process boundary", async () => {

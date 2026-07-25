@@ -871,8 +871,24 @@ export class TerminalRenderer implements ReviewRenderer {
       appendTerminalFinding(lines, finding);
     }
 
-    for (const finding of result.suppressedFindings ?? []) {
-      appendTerminalFinding(lines, finding, "suppressed; reason unavailable");
+    // Suppressed details are separate from the active findings index/total.
+    // The active count remains result.findings.length; suppressed details and
+    // the suppressed footer count are reported explicitly.
+    const suppressedFindings = result.suppressedFindings ?? [];
+    if (suppressedFindings.length > 0) {
+      lines.push(`Suppressed findings (${suppressedFindings.length})`, "");
+      for (const finding of suppressedFindings) {
+        const sites = finding.evidence.length;
+        lines.push(
+          sites > 0
+            ? `- [${finding.severity}] ${finding.title} (${evidenceCountLabel(sites)})`
+            : `- [${finding.severity}] ${finding.title}`,
+        );
+      }
+      lines.push("");
+      for (const finding of suppressedFindings) {
+        appendTerminalFinding(lines, finding, "suppressed; reason unavailable");
+      }
     }
 
     if (result.positives.length > 0) {
@@ -908,12 +924,14 @@ export class TerminalRenderer implements ReviewRenderer {
       lines.push("Overall opinion", "", normalizeParagraph(result.opinion.summary), "");
     }
 
+    // Active findings only in the primary total; suppressed counts are separate.
     lines.push(`Findings: ${result.findings.length}`);
     if (result.suppressed.observations > 0) {
       lines.push(`Suppressed observations: ${result.suppressed.observations}`);
     }
-    if (result.suppressed.findings > 0) {
-      lines.push(`Suppressed findings: ${result.suppressed.findings}`);
+    const suppressedFindingCount = Math.max(result.suppressed.findings, suppressedFindings.length);
+    if (suppressedFindingCount > 0) {
+      lines.push(`Suppressed findings: ${suppressedFindingCount}`);
     }
 
     this.write(`${lines.join("\n").trimEnd()}\n`);
@@ -963,16 +981,14 @@ function reviewObservationsForTerminal(notes: ReviewNote[]): ReviewNote[] {
 }
 
 function isContextObservation(note: ReviewNote): boolean {
+  // Prefer explicit markers only. Free-text heuristics like "Prepared … file"
+  // drop legitimate review notes (e.g. "Prepared migration file has syntax errors").
   const key = note.key.trim().toLowerCase();
   if (key.endsWith(".analysis") || key === "analysis") {
     return true;
   }
   const role = note.metadata?.role;
-  if (typeof role === "string" && role.toLowerCase() === "context") {
-    return true;
-  }
-  const summary = note.summary.trim().toLowerCase();
-  return summary.startsWith("prepared ") && summary.includes(" file");
+  return typeof role === "string" && role.toLowerCase() === "context";
 }
 
 function shortenRepositoryPath(path: string): string {

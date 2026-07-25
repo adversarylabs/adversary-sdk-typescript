@@ -426,11 +426,13 @@ new JsonRenderer().render(result);
 
 `TerminalRenderer` uses the same product layout as the adversary CLI text
 report: header (adversary, shortened repository, files scanned) → overall
-assessment → finding index → finding detail (evidence capped) → positives →
-scores → observations → overall opinion → findings footer. Prep/context notes
-(keys ending in `.analysis`, `metadata.role: "context"`, or “Prepared … files”
-summaries) are omitted from the Observations section. JSON output remains the
-full structured result.
+assessment → finding index → finding detail (evidence capped) → suppressed
+findings (when requested) → positives → scores → observations → overall
+opinion → findings footer. Active `Findings: N` counts only non-suppressed
+findings; suppressed details use a separate section and footer count.
+Prep/context notes (keys ending in `.analysis` or `metadata.role: "context"`)
+are omitted from the Observations section. JSON output remains the full
+structured result.
 
 Adversary implementations should not manually format review output.
 
