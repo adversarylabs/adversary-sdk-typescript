@@ -1,6 +1,6 @@
 {
   "name": "@adversarylabs/sdk",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Small TypeScript SDK for authoring Adversaries.",
   "type": "module",
   "license": "MIT",
