@@ -1465,10 +1465,11 @@ function assessmentConcern(finding: ReviewFinding): string {
 }
 
 function concernClause(concern: string): string {
-  // Finite verbs common in finding titles/summaries. Noun phrases such as
-  // "direct process termination" intentionally do not match.
+  // Finite verbs with a following complement/object. Requiring a trailing token
+  // keeps noun phrases such as "memory leaks", "stale reads", and "concurrent
+  // writes" from being rewritten as broken "that the …" clauses.
   const isClause =
-    /\b(?:allows|are|binds|blocks|builds|bypasses|calls|can|closes|contains|copies|could|creates|detaches|did|discards|do|does|exits|exposes|fails|forks|has|have|ignores|includes|installs|is|kills|lacks|leaks|leaves|logs|maps|may|might|must|opens|panics|prints|reads|references|relies|replaces|requires|returns|runs|skips|spawns|starts|terminates|throws|uses|was|were|writes)\b/i.test(
+    /\b(?:allows|are|binds|blocks|builds|bypasses|calls|can|closes|contains|copies|could|creates|detaches|did|discards|do|does|exits|exposes|fails|forks|has|have|ignores|includes|installs|is|kills|lacks|leaks|leaves|logs|maps|may|might|must|opens|panics|prints|reads|references|relies|replaces|requires|returns|runs|skips|spawns|starts|terminates|throws|uses|was|were|writes)\b\s+\S+/i.test(
       concern,
     );
   if (!isClause) {
@@ -1533,7 +1534,10 @@ export function formatOpinion(options: FormatOpinionOptions): ReviewOpinion {
     throw new Error("formatOpinion requires a boolean ship decision.");
   }
 
-  const posture = options.posture ?? resolveReviewPosture(options.change ?? null);
+  const posture =
+    options.posture === undefined
+      ? resolveReviewPosture(options.change ?? null)
+      : parseReviewPosture(options.posture, "formatOpinion posture");
   const deadline = opinionDeadline(posture);
   const remainingCount = options.remainingCount ?? 0;
 
@@ -1572,6 +1576,13 @@ export function formatOpinion(options: FormatOpinionOptions): ReviewOpinion {
   };
 }
 
+function parseReviewPosture(value: unknown, label: string): ReviewPosture {
+  if (value === "repository" || value === "change" || value === "worktree") {
+    return value;
+  }
+  throw new Error(`${label} must be one of repository, change, or worktree.`);
+}
+
 function opinionDeadline(posture: ReviewPosture): string {
   switch (posture) {
     case "worktree":
@@ -1580,6 +1591,10 @@ function opinionDeadline(posture: ReviewPosture): string {
       return "before merging";
     case "repository":
       return "before shipping";
+    default: {
+      const _exhaustive: never = posture;
+      throw new Error(`unsupported review posture: ${String(_exhaustive)}`);
+    }
   }
 }
 
@@ -1591,6 +1606,10 @@ function opinionApproveAsIs(posture: ReviewPosture): string {
       return "I would merge this change as-is.";
     case "repository":
       return "I would ship this as-is.";
+    default: {
+      const _exhaustive: never = posture;
+      throw new Error(`unsupported review posture: ${String(_exhaustive)}`);
+    }
   }
 }
 
@@ -1602,6 +1621,10 @@ function opinionApproveWithFollowUp(posture: ReviewPosture, concern: string): st
       return `I would merge this change and address ${concern} as follow-up hardening.`;
     case "repository":
       return `I would ship this as-is. Addressing ${concern} is the only improvement I would recommend before shipping.`;
+    default: {
+      const _exhaustive: never = posture;
+      throw new Error(`unsupported review posture: ${String(_exhaustive)}`);
+    }
   }
 }
 

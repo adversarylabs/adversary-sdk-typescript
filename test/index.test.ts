@@ -9,6 +9,7 @@ import {
   Adversary,
   Confidence,
   JsonRenderer,
+  type ReviewPosture,
   Severity,
   TerminalRenderer,
   createAdversaryRunEnvelope,
@@ -263,6 +264,26 @@ describe("review posture and formatOpinion", () => {
     expect(
       normalizeOpinionConcern("direct process termination below the application boundary"),
     ).toBe("direct process termination below the application boundary");
+  });
+
+  it("keeps verb-shaped noun phrases out of that-clause rewriting", () => {
+    expect(normalizeOpinionConcern("memory leaks")).toBe("memory leaks");
+    expect(normalizeOpinionConcern("stale reads")).toBe("stale reads");
+    expect(normalizeOpinionConcern("concurrent writes")).toBe("concurrent writes");
+    expect(formatOpinion({ ship: false, concern: "memory leaks", posture: "change" })).toEqual({
+      ship: false,
+      summary: "I would address memory leaks before merging.",
+    });
+  });
+
+  it("rejects unsupported posture values at the public boundary", () => {
+    expect(() =>
+      formatOpinion({
+        ship: true,
+        // Callers in JavaScript can pass arbitrary strings.
+        posture: "production" as ReviewPosture,
+      }),
+    ).toThrow(/posture must be one of repository, change, or worktree/);
   });
 
   it("frames blocking opinions by posture without hardcoding merge language in callers", () => {
