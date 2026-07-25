@@ -200,26 +200,37 @@ concern into posture-aware prose:
 | `worktree` | uncommitted local changes (`headRef` is `WORKTREE`) | before committing |
 
 ```ts
-import { formatOpinion } from "@adversarylabs/sdk";
+import { formatOpinion, requireOpinionConcern } from "@adversarylabs/sdk";
 
 ctx.review.opinion(
   formatOpinion({
     ship: false,
-    // Prefer a noun phrase. Full clauses are normalized for grammar.
+    // Must be a noun phrase suitable after "I would address …".
     concern: "direct process termination below the application boundary",
     change: ctx.change,
   }),
 );
+
+// Validate early when adapting model titles or free-form text:
+requireOpinionConcern("forced exit code 124");
+// throws: requireOpinionConcern("commands replace inherited context");
 ```
 
 Helpers:
 
 - `resolveReviewPosture(change)` — map `ctx.change` to `repository` | `change` | `worktree`
-- `normalizeOpinionConcern(concern)` — normalize titles/clauses for "address …" sentences
-- `formatOpinion({ ship, concern?, remainingCount?, change?, posture? })` — build `{ ship, summary }`
+- `isOpinionConcernPhrase(concern)` — true when the string is a short noun phrase
+- `requireOpinionConcern(concern)` — validate/normalize a noun phrase or throw
+- `normalizeOpinionConcern(concern)` — lenient helper (may wrap clauses as `that …`); prefer
+  `requireOpinionConcern` for overall opinions
+- `formatOpinion({ ship, concern?, remainingCount?, change?, posture? })` — build `{ ship, summary }`;
+  **rejects clause-shaped concerns**
 
 When an adversary omits `ctx.review.opinion(...)`, the SDK synthesizes an opinion from residual
 findings using the same posture rules.
+
+**Ownership:** adversaries supply noun-phrase concerns; the SDK frames posture language and
+validates concern shape. The CLI prints `opinion.summary` and does not rewrite prose.
 
 ### `app.defineRule(definition)`
 
