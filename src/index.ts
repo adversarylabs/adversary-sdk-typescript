@@ -312,17 +312,17 @@ export interface RuntimeInput {
 /** The requested review scope, normalized from the runtime input's change block. */
 export interface ChangeContext {
   /** Change representation reported by the runner; "diff" today. */
-  type?: string;
+  readonly type?: string;
   /** Base revision of the reviewed change. */
-  baseRef?: string;
+  readonly baseRef?: string;
   /** Head revision of the reviewed change, or the WORKTREE sentinel. */
-  headRef?: string;
+  readonly headRef?: string;
   /** "changed" restricts review to the change; "all" requests the entire target. */
-  scanMode: "changed" | "all";
+  readonly scanMode: "changed" | "all";
   /** Repository-relative paths the runner identified as changed. */
-  changedFiles: string[];
+  readonly changedFiles: readonly string[];
   /** True when the reviewed head is the uncommitted worktree. */
-  worktree: boolean;
+  readonly worktree: boolean;
 }
 
 export interface Summary {
@@ -694,6 +694,10 @@ export async function parseInput(path = DEFAULT_INPUT_PATH): Promise<RuntimeInpu
         throw new Error(`Invalid input at ${path}: change.${field} must be a string.`);
       }
     }
+    const scanMode = parsed.change.scan_mode;
+    if (scanMode !== undefined && scanMode !== "changed" && scanMode !== "all") {
+      throw new Error(`Invalid input at ${path}: change.scan_mode must be "changed" or "all".`);
+    }
     const changedFiles = parsed.change.changed_files;
     if (
       changedFiles !== undefined &&
@@ -899,14 +903,18 @@ export function normalizeChangeContext(
   if (change === undefined || change === null) {
     return null;
   }
-  return {
+  const scanMode = change.scan_mode ?? "changed";
+  if (scanMode !== "changed" && scanMode !== "all") {
+    throw new Error(`Unsupported change scan_mode "${change.scan_mode}".`);
+  }
+  return Object.freeze({
     ...(change.type === undefined ? {} : { type: change.type }),
     ...(change.base_ref === undefined ? {} : { baseRef: change.base_ref }),
     ...(change.head_ref === undefined ? {} : { headRef: change.head_ref }),
-    scanMode: change.scan_mode === "all" ? "all" : "changed",
-    changedFiles: [...(change.changed_files ?? [])],
+    scanMode,
+    changedFiles: Object.freeze([...(change.changed_files ?? [])]),
     worktree: change.head_ref === WORKTREE_HEAD_REF,
-  };
+  });
 }
 
 function createRuleContext(

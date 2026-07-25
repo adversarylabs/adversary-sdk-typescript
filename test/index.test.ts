@@ -100,6 +100,20 @@ describe("input loading", () => {
       "change.changed_files must be an array of strings",
     );
   });
+
+  it("rejects an unsupported scan mode", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "adversary-sdk-"));
+    const inputPath = join(directory, "input.json");
+
+    await writeFile(
+      inputPath,
+      JSON.stringify({ source: { path: "/repo" }, change: { scan_mode: "everything" } }),
+    );
+
+    await expect(parseInput(inputPath)).rejects.toThrow(
+      'change.scan_mode must be "changed" or "all"',
+    );
+  });
 });
 
 describe("change context", () => {
@@ -136,6 +150,22 @@ describe("change context", () => {
   it("returns null for an absent or null change", () => {
     expect(normalizeChangeContext(undefined)).toBeNull();
     expect(normalizeChangeContext(null)).toBeNull();
+  });
+
+  it("throws on an unsupported scan mode", () => {
+    expect(() => normalizeChangeContext({ scan_mode: "everything" })).toThrow(
+      'Unsupported change scan_mode "everything"',
+    );
+  });
+
+  it("freezes the normalized change so rules cannot mutate the shared scope", () => {
+    const change = normalizeChangeContext({
+      scan_mode: "changed",
+      changed_files: ["src/index.ts"],
+    });
+
+    expect(Object.isFrozen(change)).toBe(true);
+    expect(Object.isFrozen(change?.changedFiles)).toBe(true);
   });
 
   it("exposes the normalized change on the rule context", async () => {
