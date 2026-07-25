@@ -246,9 +246,10 @@ export interface FormatOpinionOptions {
   /** Whether the reviewer would accept the current target as-is enough to proceed. */
   ship: boolean;
   /**
-   * What should be fixed. Prefer a short noun phrase
-   * ("direct process termination below the application boundary").
-   * Full clauses are normalized for "address …" sentences.
+   * What should be fixed. Must be a short noun phrase suitable after
+   * "I would address …" (for example "direct process termination below the
+   * application boundary"). Validated by {@link requireOpinionConcern}; clauses
+   * and sentence punctuation are rejected (they are not rewritten).
    */
   concern?: string;
   /**
@@ -1670,7 +1671,12 @@ export function requireOpinionConcern(concern: string, label = "opinion concern"
       `${label} must be a non-empty noun phrase suitable after "address …" (for example "direct process termination").`,
     );
   }
-  const normalized = lowercaseFirst(trimTrailingSentencePunctuation(normalizeParagraph(trimmed)));
+  // Reject sentence punctuation before any stripping so "foo." does not bypass
+  // the noun-phrase contract by normalizing to "foo".
+  if (/[.!?]/.test(trimmed)) {
+    throw new Error(`${label} must be a noun phrase, not a sentence (remove ".!?").`);
+  }
+  const normalized = lowercaseFirst(normalizeParagraph(trimmed));
   if (!isNonEmptyString(normalized)) {
     throw new Error(
       `${label} must be a non-empty noun phrase suitable after "address …" (for example "direct process termination").`,
@@ -1680,9 +1686,6 @@ export function requireOpinionConcern(concern: string, label = "opinion concern"
     throw new Error(
       `${label} must be at most ${MAX_OPINION_CONCERN_LENGTH} characters (got ${normalized.length}).`,
     );
-  }
-  if (/[.!?]/.test(normalized)) {
-    throw new Error(`${label} must be a noun phrase, not a sentence (remove ".!?").`);
   }
   if (looksLikeFiniteClause(normalized)) {
     throw new Error(

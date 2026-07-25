@@ -409,6 +409,12 @@ describe("review posture and formatOpinion", () => {
     expect(() => requireOpinionConcern("too long. with punctuation")).toThrow(
       /sentence|noun phrase/,
     );
+    // Trailing terminal punctuation must not be stripped before rejection.
+    expect(() => requireOpinionConcern("direct process termination.")).toThrow(
+      /sentence|noun phrase/,
+    );
+    expect(() => requireOpinionConcern("memory leaks!")).toThrow(/sentence|noun phrase/);
+    expect(isOpinionConcernPhrase("memory leaks.")).toBe(false);
     expect(() =>
       formatOpinion({ ship: false, concern: "commands replace inherited context" }),
     ).toThrow(/formatOpinion concern/);
