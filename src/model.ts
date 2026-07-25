@@ -41,6 +41,36 @@ export interface ReviewModel {
   review<T = unknown>(request: ModelReviewRequest): Promise<ModelReviewResult<T>>;
 }
 
+/**
+ * Request a short noun-phrase concern suitable after "I would address …".
+ * Implemented by the SDK via {@link ReviewModel.review} (CLI broker pass-through).
+ */
+export interface ModelConcernRequest {
+  /** Free-form title, clause, or draft concern to rewrite. */
+  text: string;
+  budget?: ModelReviewBudget;
+  /**
+   * Extra attempts when the model returns a phrase that fails noun-phrase validation.
+   * Defaults to 1 retry (2 total attempts).
+   */
+  maxAttempts?: number;
+}
+
+export interface ModelConcernResult {
+  /** Validated noun phrase (see requireOpinionConcern). */
+  concern: string;
+  /** False when `text` was already a valid noun phrase (no broker call). */
+  rewritten: boolean;
+  provider: string;
+  model: string;
+  usage?: ModelReviewUsage;
+}
+
+/** Rule-context model: broker review plus opinion-concern rewrite. */
+export type ContextualReviewModel = ReviewModel & {
+  concern(request: ModelConcernRequest): Promise<ModelConcernResult>;
+};
+
 export type ModelEnvironment = Readonly<Record<string, string | undefined>>;
 
 interface ModelBrokerRequest extends ModelReviewRequest {

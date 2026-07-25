@@ -187,7 +187,7 @@ app.rule("scoped", async (ctx) => {
 });
 ```
 
-### Opinion framing (`formatOpinion`)
+### Opinion framing (`formatOpinion` / `formatOpinionAsync`)
 
 Do not hardcode "before merging" (or similar decision language) in domain adversaries.
 The runner already resolved the review posture; the SDK turns a ship decision and domain
@@ -200,16 +200,32 @@ concern into posture-aware prose:
 | `worktree` | uncommitted local changes (`headRef` is `WORKTREE`) | before committing |
 
 ```ts
-import { formatOpinion, requireOpinionConcern } from "@adversarylabs/sdk";
+import { formatOpinion, formatOpinionAsync, requireOpinionConcern } from "@adversarylabs/sdk";
 
+// Synchronous: concern must already be a noun phrase.
 ctx.review.opinion(
   formatOpinion({
     ship: false,
-    // Must be a noun phrase suitable after "I would address …".
     concern: "direct process termination below the application boundary",
     change: ctx.change,
   }),
 );
+
+// Async: free-form model titles/clauses are rewritten via the CLI model broker.
+ctx.review.opinion(
+  await formatOpinionAsync({
+    ship: false,
+    concern: "api get/post/patch/put silently no-op for v1 paths",
+    change: ctx.change,
+    model: ctx.model,
+  }),
+);
+
+// Or rewrite only the concern, then format:
+const { concern } = await ctx.model.concern({
+  text: "Commands discard inherited context, breaking Ctrl+C",
+});
+// concern === "inherited context in command handlers" (example)
 
 // Validate early when adapting model titles or free-form text:
 requireOpinionConcern("forced exit code 124");
@@ -224,13 +240,19 @@ Helpers:
 - `normalizeOpinionConcern(concern)` — lenient helper (may wrap clauses as `that …`); prefer
   `requireOpinionConcern` for overall opinions
 - `formatOpinion({ ship, concern?, remainingCount?, change?, posture? })` — build `{ ship, summary }`;
-  **rejects clause-shaped concerns**
+  **rejects clause-shaped / headline concerns**
+- `formatOpinionAsync({ ship, concern?, model, … })` — same framing; rewrites invalid concerns
+  through the model broker (no call when the phrase is already valid)
+- `rewriteOpinionConcern(model, { text })` / `ctx.model.concern({ text })` — pass-through rewrite
+  only (structured schema + `requireOpinionConcern` validation, one retry by default)
 
 When an adversary omits `ctx.review.opinion(...)`, the SDK synthesizes an opinion from residual
 findings using the same posture rules.
 
-**Ownership:** adversaries supply noun-phrase concerns; the SDK frames posture language and
-validates concern shape. The CLI prints `opinion.summary` and does not rewrite prose.
+**Ownership:** adversaries supply judgment (ship + concern draft); the SDK validates noun-phrase
+shape, optionally rewrites invalid concerns via the CLI-owned model broker, and frames posture
+language. The CLI prints `opinion.summary` and does not rewrite prose at render time.
+Provider credentials remain in the CLI broker (`permissions.model: true`).
 
 ### `app.defineRule(definition)`
 
