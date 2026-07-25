@@ -6,8 +6,8 @@ import {
   type ModelConcernRequest,
   type ModelConcernResult,
   type ModelReviewBudget,
-  type ReviewModel,
   ModelReviewError,
+  type ReviewModel,
   createModelFromEnvironment,
   unavailableModel,
 } from "./model.js";

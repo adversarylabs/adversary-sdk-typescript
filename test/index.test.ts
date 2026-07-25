@@ -398,9 +398,9 @@ describe("review posture and formatOpinion", () => {
     expect(isOpinionConcernPhrase("forced exit code 124")).toBe(true);
     expect(isOpinionConcernPhrase("stdout/stderr contract violations")).toBe(true);
     // Comma-separated list noun phrases remain valid.
-    expect(
-      requireOpinionConcern("cancellation, exit codes, and stream contract issues"),
-    ).toBe("cancellation, exit codes, and stream contract issues");
+    expect(requireOpinionConcern("cancellation, exit codes, and stream contract issues")).toBe(
+      "cancellation, exit codes, and stream contract issues",
+    );
 
     expect(() => requireOpinionConcern("Command code terminates the process directly")).toThrow(
       /noun phrase/,
