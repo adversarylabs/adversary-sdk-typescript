@@ -15,12 +15,14 @@ import {
   createAdversaryRunEnvelope,
   defineRule,
   formatOpinion,
+  isOpinionConcernPhrase,
   log,
   normalizeChangeContext,
   normalizeConfidence,
   normalizeOpinionConcern,
   parseInput,
   rankFindings,
+  requireOpinionConcern,
   resolveReviewPosture,
   ruleRegistry,
   writeOutput,
@@ -366,7 +368,7 @@ describe("review posture and formatOpinion", () => {
   it("frames whole-target --all-files reviews as repository posture even when refs exist", () => {
     const opinion = formatOpinion({
       ship: false,
-      concern: "Command code terminates the process directly",
+      concern: "direct process termination below the application boundary",
       change: normalizeChangeContext({
         type: "diff",
         base_ref: "main",
@@ -377,9 +379,39 @@ describe("review posture and formatOpinion", () => {
     });
 
     expect(opinion.summary).toBe(
-      "I would address that the command code terminates the process directly before shipping.",
+      "I would address direct process termination below the application boundary before shipping.",
     );
     expect(opinion.summary).not.toContain("before merging");
+  });
+
+  it("requireOpinionConcern accepts noun phrases and rejects clauses", () => {
+    expect(requireOpinionConcern("direct process termination below the application boundary")).toBe(
+      "direct process termination below the application boundary",
+    );
+    expect(requireOpinionConcern("discarded command execution errors")).toBe(
+      "discarded command execution errors",
+    );
+    expect(requireOpinionConcern("memory leaks")).toBe("memory leaks");
+    expect(isOpinionConcernPhrase("forced exit code 124")).toBe(true);
+
+    expect(() => requireOpinionConcern("Command code terminates the process directly")).toThrow(
+      /noun phrase/,
+    );
+    expect(() =>
+      requireOpinionConcern(
+        "commands replace inherited context with context.Background, breaking Ctrl+C",
+      ),
+    ).toThrow(/noun phrase/);
+    expect(() => requireOpinionConcern("defer os.Exit(124) forces exit code 124")).toThrow(
+      /noun phrase/,
+    );
+    expect(isOpinionConcernPhrase("commands replace inherited context")).toBe(false);
+    expect(() => requireOpinionConcern("too long. with punctuation")).toThrow(
+      /sentence|noun phrase/,
+    );
+    expect(() =>
+      formatOpinion({ ship: false, concern: "commands replace inherited context" }),
+    ).toThrow(/formatOpinion concern/);
   });
 });
 

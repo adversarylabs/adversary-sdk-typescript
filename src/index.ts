@@ -1618,9 +1618,15 @@ export function resolveReviewPosture(change: ChangeContext | null | undefined): 
   return "change";
 }
 
+/** Maximum length for a concern phrase passed to formatOpinion. */
+export const MAX_OPINION_CONCERN_LENGTH = 100;
+
 /**
  * Normalize a concern for use after "address …". Noun phrases pass through;
  * full clauses become "that …" so rule titles remain grammatical.
+ *
+ * Prefer {@link requireOpinionConcern} / {@link formatOpinion} for overall opinion
+ * text. This helper remains available when synthesizing assessment-style clauses.
  */
 export function normalizeOpinionConcern(concern: string): string {
   const normalized = lowercaseFirst(trimTrailingSentencePunctuation(normalizeParagraph(concern)));
@@ -1631,10 +1637,67 @@ export function normalizeOpinionConcern(concern: string): string {
 }
 
 /**
+ * True when `concern` is a short noun phrase suitable after "I would address …".
+ * Rejects empty values, sentence punctuation, long strings, and finite-clause shapes
+ * such as "commands replace inherited context".
+ */
+export function isOpinionConcernPhrase(concern: string): boolean {
+  try {
+    requireOpinionConcern(concern);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Validate and normalize a noun-phrase concern for {@link formatOpinion}.
+ * Throws when the value is empty, too long, sentence-like, or a finite clause.
+ *
+ * @example
+ * ```ts
+ * requireOpinionConcern("direct process termination below the application boundary");
+ * // throws: requireOpinionConcern("commands replace inherited context with context.Background");
+ * ```
+ */
+export function requireOpinionConcern(concern: string, label = "opinion concern"): string {
+  if (typeof concern !== "string") {
+    throw new Error(`${label} must be a string.`);
+  }
+  const trimmed = concern.trim();
+  if (trimmed === "") {
+    throw new Error(
+      `${label} must be a non-empty noun phrase suitable after "address …" (for example "direct process termination").`,
+    );
+  }
+  const normalized = lowercaseFirst(trimTrailingSentencePunctuation(normalizeParagraph(trimmed)));
+  if (!isNonEmptyString(normalized)) {
+    throw new Error(
+      `${label} must be a non-empty noun phrase suitable after "address …" (for example "direct process termination").`,
+    );
+  }
+  if (normalized.length > MAX_OPINION_CONCERN_LENGTH) {
+    throw new Error(
+      `${label} must be at most ${MAX_OPINION_CONCERN_LENGTH} characters (got ${normalized.length}).`,
+    );
+  }
+  if (/[.!?]/.test(normalized)) {
+    throw new Error(`${label} must be a noun phrase, not a sentence (remove ".!?").`);
+  }
+  if (looksLikeFiniteClause(normalized)) {
+    throw new Error(
+      `${label} must be a noun phrase (for example "direct process termination"), not a clause (for example "commands replace inherited context").`,
+    );
+  }
+  return normalized;
+}
+
+/**
  * Build a posture-aware review opinion from a ship decision and optional concern.
  *
- * Domain adversaries should pass judgment (ship + concern phrase) and let the SDK
- * choose merge/commit/shipping language from the runner-resolved change scope.
+ * Domain adversaries should pass judgment (ship + **noun-phrase** concern) and let
+ * the SDK choose merge/commit/shipping language from the runner-resolved change scope.
+ * Concerns are validated with {@link requireOpinionConcern}.
  *
  * @example
  * ```ts
@@ -1669,7 +1732,7 @@ export function formatOpinion(options: FormatOpinionOptions): ReviewOpinion {
   const concern =
     options.concern === undefined || options.concern.trim() === ""
       ? undefined
-      : normalizeOpinionConcern(options.concern);
+      : requireOpinionConcern(options.concern, "formatOpinion concern");
 
   if (options.ship) {
     if (concern === undefined) {
@@ -1692,6 +1755,31 @@ export function formatOpinion(options: FormatOpinionOptions): ReviewOpinion {
     ship: false,
     summary: `I would address ${concern} ${deadline}.`,
   };
+}
+
+/**
+ * True when the phrase looks like a finite clause (subject + finite verb + complement),
+ * not a noun phrase. Used to reject bad formatOpinion concerns.
+ */
+function looksLikeFiniteClause(concern: string): boolean {
+  // Finite verb with a following token (shared with concernClause).
+  if (
+    /\b(?:allows|are|binds|blocks|builds|bypasses|calls|can|closes|contains|copies|could|creates|detaches|did|discards|do|does|exits|exposes|fails|forks|has|have|ignores|includes|installs|is|kills|lacks|leaks|leaves|logs|maps|may|might|must|opens|panics|prints|reads|references|relies|replaces|requires|returns|runs|skips|spawns|starts|terminates|throws|uses|was|were|writes)\b\s+\S+/i.test(
+      concern,
+    )
+  ) {
+    return true;
+  }
+  // Present-tense verbs that often appear mid-title ("commands replace inherited context").
+  // Do not match past-participial adjectives at the start ("discarded command errors").
+  if (
+    /(?:^|\s)(?:replace|replaces|discard|discards|force|forces|override|overrides|cause|causes|prevent|prevents|block|blocks|break|breaks|succeed|succeeds|fail|fails|mix|mixes|omit|omits|ignore|ignores)\s+\S+/i.test(
+      concern,
+    )
+  ) {
+    return true;
+  }
+  return false;
 }
 
 function parseReviewPosture(value: unknown, label: string): ReviewPosture {
