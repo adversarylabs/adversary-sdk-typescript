@@ -135,6 +135,40 @@ app.rule("scoped", async (ctx) => {
 });
 ```
 
+### Opinion framing (`formatOpinion`)
+
+Do not hardcode "before merging" (or similar decision language) in domain adversaries.
+The runner already resolved the review posture; the SDK turns a ship decision and domain
+concern into posture-aware prose:
+
+| Posture | When | Deadline language |
+| --- | --- | --- |
+| `repository` | `change === null` or `scanMode: "all"` (for example `--all-files`) | before shipping |
+| `change` | committed range (`scanMode: "changed"`, not worktree) | before merging |
+| `worktree` | uncommitted local changes (`headRef` is `WORKTREE`) | before committing |
+
+```ts
+import { formatOpinion } from "@adversarylabs/sdk";
+
+ctx.review.opinion(
+  formatOpinion({
+    ship: false,
+    // Prefer a noun phrase. Full clauses are normalized for grammar.
+    concern: "direct process termination below the application boundary",
+    change: ctx.change,
+  }),
+);
+```
+
+Helpers:
+
+- `resolveReviewPosture(change)` — map `ctx.change` to `repository` | `change` | `worktree`
+- `normalizeOpinionConcern(concern)` — normalize titles/clauses for "address …" sentences
+- `formatOpinion({ ship, concern?, remainingCount?, change?, posture? })` — build `{ ship, summary }`
+
+When an adversary omits `ctx.review.opinion(...)`, the SDK synthesizes an opinion from residual
+findings using the same posture rules.
+
 ### `app.defineRule(definition)`
 
 Registers domain-specific aggregation for a stable rule id. The SDK still owns grouping,
@@ -315,10 +349,15 @@ ctx.review.observe({
   summary: "Some comments are written as complete sentences."
 });
 
-ctx.review.opinion({
-  ship: true,
-  summary: "Comment sentence style does not block shipping."
-});
+ctx.review.opinion(
+  formatOpinion({
+    ship: true,
+    concern: "comment sentence style cleanup",
+    change: ctx.change,
+  }),
+);
+// Or set a fully custom summary when domain voice must differ:
+// ctx.review.opinion({ ship: true, summary: "Comment sentence style does not block shipping." });
 
 ctx.review.score({
   key: "production-readiness",

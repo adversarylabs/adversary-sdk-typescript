@@ -214,6 +214,36 @@ export interface ReviewOpinion {
   summary: string;
 }
 
+/**
+ * Decision context for opinion framing. Derived from the runner-resolved change
+ * scope so adversaries do not invent merge/commit language for whole-target audits.
+ *
+ * - `repository` — entire target (`change === null` or `scanMode: "all"`)
+ * - `change` — committed range (branch comparison, PR, or explicit base/head)
+ * - `worktree` — uncommitted local changes (`headRef` is the WORKTREE sentinel)
+ */
+export type ReviewPosture = "repository" | "change" | "worktree";
+
+export interface FormatOpinionOptions {
+  /** Whether the reviewer would accept the current target as-is enough to proceed. */
+  ship: boolean;
+  /**
+   * What should be fixed. Prefer a short noun phrase
+   * ("direct process termination below the application boundary").
+   * Full clauses are normalized for "address …" sentences.
+   */
+  concern?: string;
+  /**
+   * When greater than 1, use plural "remaining findings" framing and ignore
+   * `concern` for the primary sentence.
+   */
+  remainingCount?: number;
+  /** Runner-resolved change scope; used when `posture` is omitted. */
+  change?: ChangeContext | null;
+  /** Explicit posture override. */
+  posture?: ReviewPosture;
+}
+
 export interface ReviewScore {
   key: string;
   label?: string;
@@ -548,14 +578,8 @@ export class Adversary {
     const cache = new Map<string, unknown>();
     const collector = createReviewCollector();
     const registry = this.ruleDefinitions.snapshot();
-    const context = createRuleContext(
-      repoPath,
-      normalizeChangeContext(options.input.change),
-      summary,
-      cache,
-      collector,
-      registry,
-    );
+    const change = normalizeChangeContext(options.input.change);
+    const context = createRuleContext(repoPath, change, summary, cache, collector, registry);
     const includeSuppressed = options.includeSuppressed;
 
     for (const rule of this.rules) {
@@ -570,6 +594,7 @@ export class Adversary {
       collector,
       policy: cloneReviewPolicy({ ...this.reviewPolicy, ...options.review }),
       registry,
+      change,
       includeSuppressed,
       includeRawObservations: options.includeRawObservations,
       timing: options.includeTiming
@@ -1060,6 +1085,7 @@ function buildReviewResult(input: {
   collector: ReviewCollector;
   policy: ReviewPolicy;
   registry: RuleRegistry;
+  change?: ChangeContext | null;
   includeSuppressed?: boolean;
   includeRawObservations?: boolean;
   timing?: ReviewResult["timing"];
@@ -1113,7 +1139,7 @@ function buildReviewResult(input: {
     positives,
     observations: reviewObservations,
     findings: eligible,
-    opinion: input.collector.opinion ?? synthesizeOpinion(eligible),
+    opinion: input.collector.opinion ?? synthesizeOpinion(eligible, input.change ?? null),
     suppressed: {
       observations: synthesis.suppressedObservations,
       findings: suppressedFindings.length,
@@ -1439,8 +1465,11 @@ function assessmentConcern(finding: ReviewFinding): string {
 }
 
 function concernClause(concern: string): string {
+  // Finite verbs with a following complement/object. Requiring a trailing token
+  // keeps noun phrases such as "memory leaks", "stale reads", and "concurrent
+  // writes" from being rewritten as broken "that the …" clauses.
   const isClause =
-    /\b(?:allows|are|builds|can|contains|copies|could|did|do|does|exposes|has|have|includes|installs|is|lacks|may|might|must|reads|references|relies|requires|runs|uses|was|were|writes)\b/i.test(
+    /\b(?:allows|are|binds|blocks|builds|bypasses|calls|can|closes|contains|copies|could|creates|detaches|did|discards|do|does|exits|exposes|fails|forks|has|have|ignores|includes|installs|is|kills|lacks|leaks|leaves|logs|maps|may|might|must|opens|panics|prints|reads|references|relies|replaces|requires|returns|runs|skips|spawns|starts|terminates|throws|uses|was|were|writes)\b\s+\S+/i.test(
       concern,
     );
   if (!isClause) {
@@ -1457,22 +1486,164 @@ function joinSentences(...sentences: Array<string | undefined>): string {
   return sentences.filter(isNonEmptyString).join(" ");
 }
 
-function synthesizeOpinion(findings: ReviewFinding[]): ReviewOpinion | undefined {
-  if (findings.length === 0) {
+/**
+ * Resolve the decision posture from the runner-provided change scope.
+ * Adversaries should prefer this (or `formatOpinion`) over hardcoding merge language.
+ */
+export function resolveReviewPosture(change: ChangeContext | null | undefined): ReviewPosture {
+  if (change === null || change === undefined || change.scanMode === "all") {
+    return "repository";
+  }
+  if (change.worktree) {
+    return "worktree";
+  }
+  return "change";
+}
+
+/**
+ * Normalize a concern for use after "address …". Noun phrases pass through;
+ * full clauses become "that …" so rule titles remain grammatical.
+ */
+export function normalizeOpinionConcern(concern: string): string {
+  const normalized = lowercaseFirst(trimTrailingSentencePunctuation(normalizeParagraph(concern)));
+  if (!isNonEmptyString(normalized)) {
+    throw new Error("opinion concern must be a non-empty string.");
+  }
+  return concernClause(normalized);
+}
+
+/**
+ * Build a posture-aware review opinion from a ship decision and optional concern.
+ *
+ * Domain adversaries should pass judgment (ship + concern phrase) and let the SDK
+ * choose merge/commit/shipping language from the runner-resolved change scope.
+ *
+ * @example
+ * ```ts
+ * ctx.review.opinion(
+ *   formatOpinion({
+ *     ship: false,
+ *     concern: "direct process termination below the application boundary",
+ *     change: ctx.change,
+ *   }),
+ * );
+ * ```
+ */
+export function formatOpinion(options: FormatOpinionOptions): ReviewOpinion {
+  if (typeof options.ship !== "boolean") {
+    throw new Error("formatOpinion requires a boolean ship decision.");
+  }
+
+  const posture =
+    options.posture === undefined
+      ? resolveReviewPosture(options.change ?? null)
+      : parseReviewPosture(options.posture, "formatOpinion posture");
+  const deadline = opinionDeadline(posture);
+  const remainingCount = options.remainingCount ?? 0;
+
+  if (remainingCount > 1) {
+    return {
+      ship: options.ship,
+      summary: `I would address the remaining findings ${deadline}.`,
+    };
+  }
+
+  const concern =
+    options.concern === undefined || options.concern.trim() === ""
+      ? undefined
+      : normalizeOpinionConcern(options.concern);
+
+  if (options.ship) {
+    if (concern === undefined) {
+      return { ship: true, summary: opinionApproveAsIs(posture) };
+    }
     return {
       ship: true,
-      summary: "I would ship this as-is.",
+      summary: opinionApproveWithFollowUp(posture, concern),
     };
+  }
+
+  if (concern === undefined) {
+    return {
+      ship: false,
+      summary: `I would address the remaining findings ${deadline}.`,
+    };
+  }
+
+  return {
+    ship: false,
+    summary: `I would address ${concern} ${deadline}.`,
+  };
+}
+
+function parseReviewPosture(value: unknown, label: string): ReviewPosture {
+  if (value === "repository" || value === "change" || value === "worktree") {
+    return value;
+  }
+  throw new Error(`${label} must be one of repository, change, or worktree.`);
+}
+
+function opinionDeadline(posture: ReviewPosture): string {
+  switch (posture) {
+    case "worktree":
+      return "before committing";
+    case "change":
+      return "before merging";
+    case "repository":
+      return "before shipping";
+    default: {
+      const _exhaustive: never = posture;
+      throw new Error(`unsupported review posture: ${String(_exhaustive)}`);
+    }
+  }
+}
+
+function opinionApproveAsIs(posture: ReviewPosture): string {
+  switch (posture) {
+    case "worktree":
+      return "I would land these local changes as-is.";
+    case "change":
+      return "I would merge this change as-is.";
+    case "repository":
+      return "I would ship this as-is.";
+    default: {
+      const _exhaustive: never = posture;
+      throw new Error(`unsupported review posture: ${String(_exhaustive)}`);
+    }
+  }
+}
+
+function opinionApproveWithFollowUp(posture: ReviewPosture, concern: string): string {
+  switch (posture) {
+    case "worktree":
+      return `I would land these local changes and address ${concern} as follow-up hardening.`;
+    case "change":
+      return `I would merge this change and address ${concern} as follow-up hardening.`;
+    case "repository":
+      return `I would ship this as-is. Addressing ${concern} is the only improvement I would recommend before shipping.`;
+    default: {
+      const _exhaustive: never = posture;
+      throw new Error(`unsupported review posture: ${String(_exhaustive)}`);
+    }
+  }
+}
+
+function synthesizeOpinion(
+  findings: ReviewFinding[],
+  change: ChangeContext | null,
+): ReviewOpinion | undefined {
+  const posture = resolveReviewPosture(change);
+  const deadline = opinionDeadline(posture);
+
+  if (findings.length === 0) {
+    return formatOpinion({ ship: true, posture });
   }
 
   const highestSeverity = highestFindingSeverity(findings);
   const ship = severityWeight(highestSeverity) < severityWeight(Severity.High);
 
   if (findings.length > 1) {
-    return {
-      ship,
-      summary: "I would address the remaining findings before production.",
-    };
+    return formatOpinion({ ship, remainingCount: findings.length, posture });
   }
 
   const finding = findings[0];
@@ -1480,8 +1651,8 @@ function synthesizeOpinion(findings: ReviewFinding[]): ReviewOpinion | undefined
   return {
     ship,
     summary: ship
-      ? `I would ship this as-is. ${improvement} is the only improvement I would recommend before production.`
-      : `${improvement} is the most important improvement to address before production.`,
+      ? `${opinionApproveAsIs(posture)} ${improvement} is the only improvement I would recommend ${deadline}.`
+      : `${improvement} is the most important improvement to address ${deadline}.`,
   };
 }
 
