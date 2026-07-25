@@ -13,11 +13,14 @@ import {
   TerminalRenderer,
   createAdversaryRunEnvelope,
   defineRule,
+  formatOpinion,
   log,
   normalizeChangeContext,
   normalizeConfidence,
+  normalizeOpinionConcern,
   parseInput,
   rankFindings,
+  resolveReviewPosture,
   ruleRegistry,
   writeOutput,
 } from "../src/index.js";
@@ -212,6 +215,150 @@ describe("types", () => {
     expect(Severity.Medium).toBe("medium");
     expect(Severity.High).toBe("high");
     expect(Severity.Critical).toBe("critical");
+  });
+});
+
+describe("review posture and formatOpinion", () => {
+  it("maps change scope to posture", () => {
+    expect(resolveReviewPosture(null)).toBe("repository");
+    expect(
+      resolveReviewPosture(
+        normalizeChangeContext({
+          type: "diff",
+          base_ref: "main",
+          head_ref: "HEAD",
+          scan_mode: "all",
+          changed_files: ["a.go"],
+        }),
+      ),
+    ).toBe("repository");
+    expect(
+      resolveReviewPosture(
+        normalizeChangeContext({
+          type: "diff",
+          base_ref: "main",
+          head_ref: "HEAD",
+          scan_mode: "changed",
+          changed_files: ["a.go"],
+        }),
+      ),
+    ).toBe("change");
+    expect(
+      resolveReviewPosture(
+        normalizeChangeContext({
+          type: "diff",
+          base_ref: "HEAD",
+          head_ref: "WORKTREE",
+          scan_mode: "changed",
+          changed_files: ["a.go"],
+        }),
+      ),
+    ).toBe("worktree");
+  });
+
+  it("normalizes clause titles for address sentences", () => {
+    expect(normalizeOpinionConcern("Command code terminates the process directly")).toBe(
+      "that the command code terminates the process directly",
+    );
+    expect(
+      normalizeOpinionConcern("direct process termination below the application boundary"),
+    ).toBe("direct process termination below the application boundary");
+  });
+
+  it("frames blocking opinions by posture without hardcoding merge language in callers", () => {
+    const concern = "direct process termination below the application boundary";
+
+    expect(
+      formatOpinion({
+        ship: false,
+        concern,
+        change: null,
+      }),
+    ).toEqual({
+      ship: false,
+      summary:
+        "I would address direct process termination below the application boundary before shipping.",
+    });
+
+    expect(
+      formatOpinion({
+        ship: false,
+        concern,
+        change: normalizeChangeContext({
+          type: "diff",
+          base_ref: "main",
+          head_ref: "HEAD",
+          scan_mode: "changed",
+          changed_files: ["cmd/root.go"],
+        }),
+      }),
+    ).toEqual({
+      ship: false,
+      summary:
+        "I would address direct process termination below the application boundary before merging.",
+    });
+
+    expect(
+      formatOpinion({
+        ship: false,
+        concern,
+        change: normalizeChangeContext({
+          type: "diff",
+          base_ref: "HEAD",
+          head_ref: "WORKTREE",
+          scan_mode: "changed",
+          changed_files: ["cmd/root.go"],
+        }),
+      }),
+    ).toEqual({
+      ship: false,
+      summary:
+        "I would address direct process termination below the application boundary before committing.",
+    });
+  });
+
+  it("frames ship-with-follow-up opinions for change reviews", () => {
+    expect(
+      formatOpinion({
+        ship: true,
+        concern: "discarded command execution errors",
+        posture: "change",
+      }),
+    ).toEqual({
+      ship: true,
+      summary:
+        "I would merge this change and address discarded command execution errors as follow-up hardening.",
+    });
+  });
+
+  it("frames plural remaining findings by posture", () => {
+    expect(formatOpinion({ ship: false, remainingCount: 3, posture: "repository" })).toEqual({
+      ship: false,
+      summary: "I would address the remaining findings before shipping.",
+    });
+    expect(formatOpinion({ ship: false, remainingCount: 3, posture: "change" })).toEqual({
+      ship: false,
+      summary: "I would address the remaining findings before merging.",
+    });
+  });
+
+  it("frames whole-target --all-files reviews as repository posture even when refs exist", () => {
+    const opinion = formatOpinion({
+      ship: false,
+      concern: "Command code terminates the process directly",
+      change: normalizeChangeContext({
+        type: "diff",
+        base_ref: "main",
+        head_ref: "HEAD",
+        scan_mode: "all",
+        changed_files: ["cmd/root.go"],
+      }),
+    });
+
+    expect(opinion.summary).toBe(
+      "I would address that the command code terminates the process directly before shipping.",
+    );
+    expect(opinion.summary).not.toContain("before merging");
   });
 });
 
@@ -1159,7 +1306,7 @@ describe("review pipeline", () => {
     const result = await app.run({ input: { source: { path: "/repo" } } });
 
     expect(result.opinion?.summary).toMatchInlineSnapshot(
-      `"I would address the remaining findings before production."`,
+      `"I would address the remaining findings before shipping."`,
     );
   });
 
@@ -1170,6 +1317,73 @@ describe("review pipeline", () => {
     const result = await app.run({ input: { source: { path: "/repo" } } });
 
     expect(result.opinion?.summary).toMatchInlineSnapshot(`"I would ship this as-is."`);
+  });
+
+  it("synthesizes change-posture opinion language for scoped reviews", async () => {
+    const app = new Adversary({
+      name: "scoped-opinion",
+      review: { minimumConfidence: "low" },
+    });
+    app.rule("findings", (ctx) => {
+      ctx.finding({
+        title: "Command code terminates the process directly",
+        category: "correctness",
+        severity: "high",
+        confidence: "high",
+        summary: "os.Exit is called below main.",
+        evidence: [{ file: "cmd/root.go", line: 12 }],
+        recommendation: "Return errors from command execution and map them in main.",
+      });
+    });
+
+    const result = await app.run({
+      input: {
+        source: { path: "/repo" },
+        change: {
+          type: "diff",
+          base_ref: "main",
+          head_ref: "HEAD",
+          scan_mode: "changed",
+          changed_files: ["cmd/root.go"],
+        },
+      },
+    });
+
+    expect(result.opinion?.summary).toContain("before merging");
+    expect(result.opinion?.summary).not.toContain("before shipping");
+  });
+
+  it("synthesizes worktree-posture opinion language for dirty reviews", async () => {
+    const app = new Adversary({
+      name: "worktree-opinion",
+      review: { minimumConfidence: "low" },
+    });
+    app.rule("findings", (ctx) => {
+      ctx.finding({
+        title: "Command code terminates the process directly",
+        category: "correctness",
+        severity: "high",
+        confidence: "high",
+        summary: "os.Exit is called below main.",
+        evidence: [{ file: "cmd/root.go", line: 12 }],
+        recommendation: "Return errors from command execution and map them in main.",
+      });
+    });
+
+    const result = await app.run({
+      input: {
+        source: { path: "/repo" },
+        change: {
+          type: "diff",
+          base_ref: "HEAD",
+          head_ref: "WORKTREE",
+          scan_mode: "changed",
+          changed_files: ["cmd/root.go"],
+        },
+      },
+    });
+
+    expect(result.opinion?.summary).toContain("before committing");
   });
 
   it("renders concise comment review text from final findings", async () => {
@@ -1271,7 +1485,7 @@ describe("review pipeline", () => {
     ]);
     expect(result.observations).toHaveLength(0);
     expect(result.opinion?.summary).toBe(
-      "I would ship this as-is. Removing complete-sentence comments that restate nearby code is the only improvement I would recommend before production.",
+      "I would ship this as-is. Removing complete-sentence comments that restate nearby code is the only improvement I would recommend before shipping.",
     );
     expect(terminal).not.toContain("Additional observations");
     expect(terminal).not.toMatch(/SDK|observations|grouping|synthesis|rendering/i);
@@ -1296,7 +1510,7 @@ describe("review pipeline", () => {
 
       Overall opinion
 
-      I would ship this as-is. Removing complete-sentence comments that restate nearby code is the only improvement I would recommend before production.
+      I would ship this as-is. Removing complete-sentence comments that restate nearby code is the only improvement I would recommend before shipping.
 
       Scan complete
 
