@@ -1,7 +1,16 @@
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { Ajv2020, type ValidateFunction } from "ajv/dist/2020.js";
-import { type ReviewModel, createModelFromEnvironment, unavailableModel } from "./model.js";
+import {
+  type ContextualReviewModel,
+  type ModelConcernRequest,
+  type ModelConcernResult,
+  type ModelReviewBudget,
+  ModelReviewError,
+  type ReviewModel,
+  createModelFromEnvironment,
+  unavailableModel,
+} from "./model.js";
 
 export {
   ADVERSARY_MODEL_ENDPOINT_ENV,
@@ -12,6 +21,9 @@ export {
   ModelUnavailableError,
   createModelFromEnvironment,
   unavailableModel,
+  type ContextualReviewModel,
+  type ModelConcernRequest,
+  type ModelConcernResult,
   type ModelReviewBudget,
   type ModelEnvironment,
   type ModelReviewRequest,
@@ -246,10 +258,9 @@ export interface FormatOpinionOptions {
   /** Whether the reviewer would accept the current target as-is enough to proceed. */
   ship: boolean;
   /**
-   * What should be fixed. Must be a short noun phrase suitable after
-   * "I would address …" (for example "direct process termination below the
-   * application boundary"). Validated by {@link requireOpinionConcern}; clauses
-   * and sentence punctuation are rejected (they are not rewritten).
+   * What should be fixed. For {@link formatOpinion}, must already be a short noun
+   * phrase suitable after "I would address …". For {@link formatOpinionAsync},
+   * free-form titles/clauses are rewritten via the model broker when invalid.
    */
   concern?: string;
   /**
@@ -261,6 +272,13 @@ export interface FormatOpinionOptions {
   change?: ChangeContext | null;
   /** Explicit posture override. */
   posture?: ReviewPosture;
+}
+
+export interface FormatOpinionAsyncOptions extends FormatOpinionOptions {
+  /** Model used to rewrite invalid concerns (CLI broker via {@link ReviewModel.review}). */
+  model: ReviewModel;
+  /** Optional budget for concern rewrite calls. */
+  concernBudget?: ModelReviewBudget;
 }
 
 export interface ReviewScore {
@@ -392,7 +410,11 @@ export interface RuleContext {
   relpath: (path: string) => string;
   glob: (pattern: string) => Promise<string[]>;
   rglob: (pattern: string) => Promise<string[]>;
-  model: ReviewModel;
+  /**
+   * CLI-brokered model access. Prefer {@link ContextualReviewModel.concern} when
+   * adapting free-form titles into noun-phrase opinion concerns.
+   */
+  model: ContextualReviewModel;
   observe: (observation: ObservationInit) => void;
   finding: (finding: FindingInput) => void;
   review: {
@@ -1075,7 +1097,7 @@ function createRuleContext(
     change,
     summary,
     cache,
-    model,
+    model: enhanceReviewModel(model),
     relpath(path: string): string {
       return relative(absoluteRepoPath, isAbsolute(path) ? path : resolve(absoluteRepoPath, path));
     },
@@ -1692,7 +1714,195 @@ export function requireOpinionConcern(concern: string, label = "opinion concern"
       `${label} must be a noun phrase (for example "direct process termination"), not a clause (for example "commands replace inherited context").`,
     );
   }
+  if (looksLikeHeadlineNotNounPhrase(normalized)) {
+    throw new Error(
+      `${label} must be a short noun phrase, not a headline (for example use "silent no-op v1 paths", not "api get/post/patch/put silently no-op for v1 paths").`,
+    );
+  }
   return normalized;
+}
+
+/** Prompt used by {@link rewriteOpinionConcern} / {@link ContextualReviewModel.concern}. */
+export const OPINION_CONCERN_REWRITE_PROMPT = `Rewrite the input text into a short noun phrase suitable after the words "I would address".
+
+Rules:
+- Return only a noun phrase (for example "direct process termination below the application boundary" or "forced exit code 124")
+- Do not write a full sentence or finite clause (not "commands replace inherited context")
+- No terminal punctuation (.!?)
+- No dotted code identifiers (not "os.Exit" or "context.Background")
+- No slash-separated method lists (not "get/post/patch/put")
+- At most ${MAX_OPINION_CONCERN_LENGTH} characters
+- Prefer the primary engineering concern over command inventories or headlines`;
+
+/** JSON Schema for structured concern rewrite output. */
+export const OPINION_CONCERN_REWRITE_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  additionalProperties: false,
+  required: ["concern"],
+  properties: {
+    concern: {
+      type: "string",
+      minLength: 3,
+      maxLength: MAX_OPINION_CONCERN_LENGTH,
+    },
+  },
+};
+
+const DEFAULT_CONCERN_REWRITE_BUDGET: Required<ModelReviewBudget> = {
+  maximumOutputTokens: 128,
+  timeoutMs: 30_000,
+};
+
+/**
+ * Ensure `text` is a validated noun-phrase concern. Already-valid phrases pass
+ * through with no model call; otherwise rewrite via the CLI model broker.
+ */
+export async function rewriteOpinionConcern(
+  model: ReviewModel,
+  request: ModelConcernRequest,
+): Promise<ModelConcernResult> {
+  if (typeof request !== "object" || request === null) {
+    throw new ModelReviewError("Model concern request must be an object.", {
+      code: "invalid_model_request",
+    });
+  }
+  if (typeof request.text !== "string") {
+    throw new ModelReviewError("Model concern text must be a string.", {
+      code: "invalid_model_request",
+    });
+  }
+  const text = request.text.trim();
+  if (text === "") {
+    throw new ModelReviewError("Model concern text must be a non-empty string.", {
+      code: "invalid_model_request",
+    });
+  }
+  if (isOpinionConcernPhrase(text)) {
+    return {
+      concern: requireOpinionConcern(text),
+      rewritten: false,
+      provider: "local",
+      model: "passthrough",
+    };
+  }
+
+  const maxAttempts =
+    request.maxAttempts === undefined
+      ? 2
+      : requirePositiveInteger(request.maxAttempts, "maxAttempts", 4);
+  const budget = {
+    maximumOutputTokens:
+      request.budget?.maximumOutputTokens ?? DEFAULT_CONCERN_REWRITE_BUDGET.maximumOutputTokens,
+    timeoutMs: request.budget?.timeoutMs ?? DEFAULT_CONCERN_REWRITE_BUDGET.timeoutMs,
+  };
+
+  let lastError: string | undefined;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const prompt =
+      attempt === 1
+        ? OPINION_CONCERN_REWRITE_PROMPT
+        : `${OPINION_CONCERN_REWRITE_PROMPT}
+
+Previous attempt was rejected: ${lastError ?? "invalid noun phrase"}.
+Return only a pure noun phrase that passes validation.`;
+
+    const result = await model.review<{ concern: string }>({
+      prompt,
+      input: {
+        text,
+        ...(lastError === undefined ? {} : { previousError: lastError }),
+      },
+      schema: OPINION_CONCERN_REWRITE_SCHEMA,
+      budget,
+    });
+
+    try {
+      const concern = requireOpinionConcern(result.output.concern, "model concern rewrite");
+      return {
+        concern,
+        rewritten: true,
+        provider: result.provider,
+        model: result.model,
+        ...(result.usage === undefined ? {} : { usage: result.usage }),
+      };
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  throw new ModelReviewError(
+    `Model failed to produce a valid opinion concern after ${maxAttempts} attempts${
+      lastError === undefined ? "" : `: ${lastError}`
+    }.`,
+    { code: "invalid_opinion_concern" },
+  );
+}
+
+/**
+ * Build a posture-aware opinion, rewriting free-form concerns via the model when needed.
+ *
+ * Prefer this over {@link formatOpinion} when the concern may be a model title or clause.
+ * Already-valid noun phrases do not trigger a broker call.
+ */
+export async function formatOpinionAsync(
+  options: FormatOpinionAsyncOptions,
+): Promise<ReviewOpinion> {
+  if (typeof options.ship !== "boolean") {
+    throw new Error("formatOpinionAsync requires a boolean ship decision.");
+  }
+  if (options.model === undefined || options.model === null) {
+    throw new Error("formatOpinionAsync requires a model.");
+  }
+
+  const remainingCount = options.remainingCount ?? 0;
+  if (remainingCount > 1 || options.concern === undefined || options.concern.trim() === "") {
+    return formatOpinion({
+      ship: options.ship,
+      ...(options.concern === undefined ? {} : { concern: options.concern }),
+      remainingCount,
+      change: options.change,
+      posture: options.posture,
+    });
+  }
+
+  if (isOpinionConcernPhrase(options.concern)) {
+    return formatOpinion({
+      ship: options.ship,
+      concern: options.concern,
+      remainingCount,
+      change: options.change,
+      posture: options.posture,
+    });
+  }
+
+  const rewritten = await rewriteOpinionConcern(options.model, {
+    text: options.concern,
+    ...(options.concernBudget === undefined ? {} : { budget: options.concernBudget }),
+  });
+  return formatOpinion({
+    ship: options.ship,
+    concern: rewritten.concern,
+    remainingCount,
+    change: options.change,
+    posture: options.posture,
+  });
+}
+
+/** Attach {@link ContextualReviewModel.concern} on top of any injectable ReviewModel. */
+export function enhanceReviewModel(model: ReviewModel): ContextualReviewModel {
+  return {
+    review: (request) => model.review(request),
+    concern: (request) => rewriteOpinionConcern(model, request),
+  };
+}
+
+function requirePositiveInteger(value: number, name: string, maximum: number): number {
+  if (!Number.isInteger(value) || value < 1 || value > maximum) {
+    throw new ModelReviewError(`${name} must be an integer from 1 through ${maximum}.`, {
+      code: "invalid_model_request",
+    });
+  }
+  return value;
 }
 
 /**
@@ -1777,6 +1987,34 @@ function looksLikeFiniteClause(concern: string): boolean {
   // Do not match past-participial adjectives at the start ("discarded command errors").
   if (
     /(?:^|\s)(?:replace|replaces|discard|discards|force|forces|override|overrides|cause|causes|prevent|prevents|block|blocks|break|breaks|succeed|succeeds|fail|fails|mix|mixes|omit|omits|ignore|ignores)\s+\S+/i.test(
+      concern,
+    )
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Headlines that are not finite clauses but still read poorly after "I would address …".
+ * Example: "api get/post/patch/put silently no-op for v1 paths".
+ */
+function looksLikeHeadlineNotNounPhrase(concern: string): boolean {
+  // Multi-segment slash lists (method inventories): get/post/patch
+  if ((concern.match(/\//g) ?? []).length >= 2) {
+    return true;
+  }
+  if (/(?:^|\s)(?:get|post|patch|put|delete)\/(?:get|post|patch|put|delete)/i.test(concern)) {
+    return true;
+  }
+  // Adverb fragments that belong in titles, not noun phrases.
+  if (/\bsilently\b/i.test(concern)) {
+    return true;
+  }
+  // Trailing participial / relative residue after a comma (headline shape).
+  // Allow list noun phrases such as "cancellation, exit codes, and stream issues".
+  if (
+    /,\s+(?:breaking|causing|preventing|leaving|blocking|forcing|overriding|so\b|which\b|and then\b)/i.test(
       concern,
     )
   ) {

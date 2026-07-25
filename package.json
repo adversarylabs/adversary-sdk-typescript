@@ -1,6 +1,6 @@
 {
   "name": "@adversarylabs/sdk",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "Small TypeScript SDK for authoring Adversaries.",
   "type": "module",
   "license": "MIT",
@@ -33,6 +33,7 @@
   "scripts": {
     "clean": "rm -rf dist",
     "build": "npm run clean && tsc -p tsconfig.json",
+    "prepare": "npm run build",
     "prepack": "npm run build",
     "test": "npm run build && vitest run",
     "lint": "biome check .",

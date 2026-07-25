@@ -9,12 +9,15 @@ import {
   Adversary,
   Confidence,
   JsonRenderer,
+  type ModelReviewRequest,
+  type ReviewModel,
   type ReviewPosture,
   Severity,
   TerminalRenderer,
   createAdversaryRunEnvelope,
   defineRule,
   formatOpinion,
+  formatOpinionAsync,
   isOpinionConcernPhrase,
   log,
   normalizeChangeContext,
@@ -393,6 +396,11 @@ describe("review posture and formatOpinion", () => {
     );
     expect(requireOpinionConcern("memory leaks")).toBe("memory leaks");
     expect(isOpinionConcernPhrase("forced exit code 124")).toBe(true);
+    expect(isOpinionConcernPhrase("stdout/stderr contract violations")).toBe(true);
+    // Comma-separated list noun phrases remain valid.
+    expect(requireOpinionConcern("cancellation, exit codes, and stream contract issues")).toBe(
+      "cancellation, exit codes, and stream contract issues",
+    );
 
     expect(() => requireOpinionConcern("Command code terminates the process directly")).toThrow(
       /noun phrase/,
@@ -401,11 +409,20 @@ describe("review posture and formatOpinion", () => {
       requireOpinionConcern(
         "commands replace inherited context with context.Background, breaking Ctrl+C",
       ),
-    ).toThrow(/noun phrase/);
+    ).toThrow(/noun phrase|headline/);
+    expect(() =>
+      requireOpinionConcern("inherited context replacement, breaking Ctrl+C cancellation"),
+    ).toThrow(/headline|noun phrase/);
     expect(() => requireOpinionConcern("defer os.Exit(124) forces exit code 124")).toThrow(
       /noun phrase/,
     );
     expect(isOpinionConcernPhrase("commands replace inherited context")).toBe(false);
+    expect(isOpinionConcernPhrase("api get/post/patch/put silently no-op for v1 paths")).toBe(
+      false,
+    );
+    expect(() =>
+      requireOpinionConcern("api get/post/patch/put silently no-op for v1 paths"),
+    ).toThrow(/headline|noun phrase/);
     expect(() => requireOpinionConcern("too long. with punctuation")).toThrow(
       /sentence|noun phrase/,
     );
@@ -418,6 +435,91 @@ describe("review posture and formatOpinion", () => {
     expect(() =>
       formatOpinion({ ship: false, concern: "commands replace inherited context" }),
     ).toThrow(/formatOpinion concern/);
+  });
+
+  it("formatOpinionAsync rewrites invalid concerns via the model", async () => {
+    const requests: ModelReviewRequest[] = [];
+    const model: ReviewModel = {
+      async review<T>(request: ModelReviewRequest) {
+        requests.push(request);
+        return {
+          output: { concern: "silent no-op v1 paths" } as T,
+          provider: "fixture",
+          model: "concern-rewriter",
+        };
+      },
+    };
+
+    const opinion = await formatOpinionAsync({
+      ship: false,
+      concern: "api get/post/patch/put silently no-op for v1 paths",
+      posture: "repository",
+      model,
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.schema).toMatchObject({ required: ["concern"] });
+    expect(opinion.summary).toBe("I would address silent no-op v1 paths before shipping.");
+  });
+
+  it("formatOpinionAsync skips the model when the concern is already valid", async () => {
+    let called = false;
+    const model: ReviewModel = {
+      async review() {
+        called = true;
+        throw new Error("should not call model");
+      },
+    };
+
+    const opinion = await formatOpinionAsync({
+      ship: false,
+      concern: "direct process termination below the application boundary",
+      posture: "repository",
+      model,
+    });
+
+    expect(called).toBe(false);
+    expect(opinion.summary).toBe(
+      "I would address direct process termination below the application boundary before shipping.",
+    );
+  });
+
+  it("ctx.model.concern rewrites free-form text through the broker pass-through", async () => {
+    const requests: ModelReviewRequest[] = [];
+    const model: ReviewModel = {
+      async review<T>(request: ModelReviewRequest) {
+        requests.push(request);
+        return {
+          output: { concern: "broken command cancellation context" } as T,
+          provider: "fixture",
+          model: "concern-rewriter",
+        };
+      },
+    };
+
+    const app = new Adversary({ name: "adversarylabs/concern-test" });
+    app.rule("rewrite", async (ctx) => {
+      const result = await ctx.model.concern({
+        text: "Commands discard inherited context, breaking Ctrl+C cancellation",
+      });
+      ctx.review.opinion(
+        formatOpinion({
+          ship: false,
+          concern: result.concern,
+          change: ctx.change,
+        }),
+      );
+    });
+
+    const output = await app.run({
+      input: { source: { path: process.cwd() } },
+      model,
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(output.opinion?.summary).toBe(
+      "I would address broken command cancellation context before shipping.",
+    );
   });
 });
 
