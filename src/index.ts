@@ -288,11 +288,41 @@ export interface WireReviewResult
   suppressedFindings?: WireReviewFinding[];
 }
 
+/** Sentinel head_ref used when the reviewed head is the uncommitted worktree. */
+export const WORKTREE_HEAD_REF = "WORKTREE";
+
+/** The change block of adversary.input.v1 as written by the runner. */
+export interface RuntimeChange {
+  type?: string;
+  base_ref?: string;
+  head_ref?: string;
+  scan_mode?: string;
+  changed_files?: string[];
+  [key: string]: unknown;
+}
+
 export interface RuntimeInput {
   source: {
     path: string;
   };
+  change?: RuntimeChange | null;
   [key: string]: unknown;
+}
+
+/** The requested review scope, normalized from the runtime input's change block. */
+export interface ChangeContext {
+  /** Change representation reported by the runner; "diff" today. */
+  readonly type?: string;
+  /** Base revision of the reviewed change. */
+  readonly baseRef?: string;
+  /** Head revision of the reviewed change, or the WORKTREE sentinel. */
+  readonly headRef?: string;
+  /** "changed" restricts review to the change; "all" requests the entire target. */
+  readonly scanMode: "changed" | "all";
+  /** Repository-relative paths the runner identified as changed. */
+  readonly changedFiles: readonly string[];
+  /** True when the reviewed head is the uncommitted worktree. */
+  readonly worktree: boolean;
 }
 
 export interface Summary {
@@ -301,6 +331,13 @@ export interface Summary {
 
 export interface RuleContext {
   repoPath: string;
+  /**
+   * The requested review scope. Null when the runner asked for a full-target
+   * review without a change context; when present, scanMode distinguishes
+   * reviewing only the change ("changed") from reviewing the entire target
+   * with change metadata available ("all").
+   */
+  change: ChangeContext | null;
   summary: Summary;
   cache: Map<string, unknown>;
   relpath: (path: string) => string;
@@ -511,7 +548,14 @@ export class Adversary {
     const cache = new Map<string, unknown>();
     const collector = createReviewCollector();
     const registry = this.ruleDefinitions.snapshot();
-    const context = createRuleContext(repoPath, summary, cache, collector, registry);
+    const context = createRuleContext(
+      repoPath,
+      normalizeChangeContext(options.input.change),
+      summary,
+      cache,
+      collector,
+      registry,
+    );
     const includeSuppressed = options.includeSuppressed;
 
     for (const rule of this.rules) {
@@ -638,6 +682,31 @@ export async function parseInput(path = DEFAULT_INPUT_PATH): Promise<RuntimeInpu
 
   if (typeof parsed.source.path !== "string" || parsed.source.path.length === 0) {
     throw new Error(`Invalid input at ${path}: source.path must be a non-empty string.`);
+  }
+
+  if (parsed.change !== undefined && parsed.change !== null) {
+    if (!isRecord(parsed.change)) {
+      throw new Error(`Invalid input at ${path}: change must be an object or null.`);
+    }
+    for (const field of ["type", "base_ref", "head_ref", "scan_mode"] as const) {
+      const value = parsed.change[field];
+      if (value !== undefined && typeof value !== "string") {
+        throw new Error(`Invalid input at ${path}: change.${field} must be a string.`);
+      }
+    }
+    const scanMode = parsed.change.scan_mode;
+    if (scanMode !== undefined && scanMode !== "changed" && scanMode !== "all") {
+      throw new Error(`Invalid input at ${path}: change.scan_mode must be "changed" or "all".`);
+    }
+    const changedFiles = parsed.change.changed_files;
+    if (
+      changedFiles !== undefined &&
+      (!Array.isArray(changedFiles) || changedFiles.some((item) => typeof item !== "string"))
+    ) {
+      throw new Error(
+        `Invalid input at ${path}: change.changed_files must be an array of strings.`,
+      );
+    }
   }
 
   return parsed as RuntimeInput;
@@ -828,8 +897,29 @@ export class TerminalRenderer implements ReviewRenderer {
   }
 }
 
+export function normalizeChangeContext(
+  change: RuntimeChange | null | undefined,
+): ChangeContext | null {
+  if (change === undefined || change === null) {
+    return null;
+  }
+  const scanMode = change.scan_mode ?? "changed";
+  if (scanMode !== "changed" && scanMode !== "all") {
+    throw new Error(`Unsupported change scan_mode "${change.scan_mode}".`);
+  }
+  return Object.freeze({
+    ...(change.type === undefined ? {} : { type: change.type }),
+    ...(change.base_ref === undefined ? {} : { baseRef: change.base_ref }),
+    ...(change.head_ref === undefined ? {} : { headRef: change.head_ref }),
+    scanMode,
+    changedFiles: Object.freeze([...(change.changed_files ?? [])]),
+    worktree: change.head_ref === WORKTREE_HEAD_REF,
+  });
+}
+
 function createRuleContext(
   repoPath: string,
+  change: ChangeContext | null,
   summary: Summary,
   cache: Map<string, unknown>,
   collector: ReviewCollector,
@@ -839,6 +929,7 @@ function createRuleContext(
 
   return {
     repoPath: absoluteRepoPath,
+    change,
     summary,
     cache,
     relpath(path: string): string {
