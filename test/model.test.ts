@@ -158,4 +158,54 @@ describe("model review capability", () => {
       }),
     ).rejects.toMatchObject<ModelReviewError>({ code: "invalid_model_output" });
   });
+
+  it("enforces the review timeout while reading the broker response body", async () => {
+    const server = createServer((_request, response) => {
+      response.setHeader("content-type", "application/json");
+      response.flushHeaders();
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address() as AddressInfo;
+    const model = new BrokerReviewModel(`http://127.0.0.1:${address.port}`, "secret");
+
+    await expect(
+      model.review({
+        prompt: "Review.",
+        input: {},
+        schema: { type: "object" },
+        budget: { timeoutMs: 25 },
+      }),
+    ).rejects.toMatchObject<ModelReviewError>({ code: "model_timeout", retryable: true });
+  });
+
+  it("accepts bracketed IPv6 loopback endpoints", () => {
+    expect(() => new BrokerReviewModel("http://[::1]:43123/v1/review", "secret")).not.toThrow();
+  });
+
+  it("rejects unknown output schema keywords", async () => {
+    const server = createServer((_request, response) => {
+      response.setHeader("content-type", "application/json");
+      response.end(
+        JSON.stringify({
+          protocolVersion: ADVERSARY_MODEL_PROTOCOL_VERSION,
+          provider: "fixture",
+          model: "reviewer-v1",
+          output: { verdict: "approve" },
+        }),
+      );
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address() as AddressInfo;
+    const model = new BrokerReviewModel(`http://127.0.0.1:${address.port}`, "secret");
+
+    await expect(
+      model.review({
+        prompt: "Review.",
+        input: {},
+        schema: { type: "object", propertiez: { verdict: { type: "string" } } },
+      }),
+    ).rejects.toMatchObject<ModelReviewError>({ code: "invalid_model_schema" });
+  });
 });

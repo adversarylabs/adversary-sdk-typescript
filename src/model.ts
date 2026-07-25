@@ -63,6 +63,10 @@ interface ModelBrokerErrorResponse {
   };
 }
 
+type NormalizedModelReviewRequest = Omit<ModelReviewRequest, "budget"> & {
+  budget: Required<ModelReviewBudget>;
+};
+
 export class ModelUnavailableError extends Error {
   constructor(message = "Model review is unavailable for this adversary execution.") {
     super(message);
@@ -111,6 +115,7 @@ export class BrokerReviewModel implements ReviewModel {
       parsed.protocol !== "http:" ||
       (parsed.hostname !== "127.0.0.1" &&
         parsed.hostname !== "::1" &&
+        parsed.hostname !== "[::1]" &&
         parsed.hostname !== "localhost")
     ) {
       throw new ModelReviewError(
@@ -131,72 +136,86 @@ export class BrokerReviewModel implements ReviewModel {
     const normalized = normalizeRequest(request);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), normalized.budget.timeoutMs);
-    let response: Response;
     try {
-      response = await fetch(this.endpoint, {
-        method: "POST",
-        headers: {
-          accept: "application/json",
-          authorization: `Bearer ${this.#token}`,
-          "content-type": "application/json",
-          "x-adversary-model-protocol": String(ADVERSARY_MODEL_PROTOCOL_VERSION),
-        },
-        body: JSON.stringify({
-          protocolVersion: ADVERSARY_MODEL_PROTOCOL_VERSION,
-          prompt: normalized.prompt,
-          input: normalized.input,
-          schema: normalized.schema,
-          budget: normalized.budget,
-        } satisfies ModelBrokerRequest),
-        signal: controller.signal,
-      });
-    } catch (error) {
-      if (controller.signal.aborted) {
+      let response: Response;
+      try {
+        response = await fetch(this.endpoint, {
+          method: "POST",
+          headers: {
+            accept: "application/json",
+            authorization: `Bearer ${this.#token}`,
+            "content-type": "application/json",
+            "x-adversary-model-protocol": String(ADVERSARY_MODEL_PROTOCOL_VERSION),
+          },
+          body: JSON.stringify({
+            protocolVersion: ADVERSARY_MODEL_PROTOCOL_VERSION,
+            prompt: normalized.prompt,
+            input: normalized.input,
+            schema: normalized.schema,
+            budget: normalized.budget,
+          } satisfies ModelBrokerRequest),
+          signal: controller.signal,
+        });
+      } catch (error) {
+        if (controller.signal.aborted) {
+          throw modelTimeoutError(normalized.budget.timeoutMs);
+        }
         throw new ModelReviewError(
-          `Model review exceeded its ${normalized.budget.timeoutMs}ms timeout.`,
-          { code: "model_timeout", retryable: true },
+          `Model broker request failed: ${error instanceof Error ? error.message : String(error)}`,
+          { code: "broker_unavailable", retryable: true },
         );
       }
-      throw new ModelReviewError(
-        `Model broker request failed: ${error instanceof Error ? error.message : String(error)}`,
-        { code: "broker_unavailable", retryable: true },
-      );
+
+      let body: string;
+      try {
+        body = await readBoundedResponse(response);
+      } catch (error) {
+        if (controller.signal.aborted) {
+          throw modelTimeoutError(normalized.budget.timeoutMs);
+        }
+        throw error;
+      }
+      let decoded: unknown;
+      try {
+        decoded = JSON.parse(body);
+      } catch {
+        throw new ModelReviewError("Model broker returned malformed JSON.", {
+          code: "invalid_broker_response",
+        });
+      }
+      if (!response.ok) {
+        const failure = decoded as ModelBrokerErrorResponse;
+        throw new ModelReviewError(
+          failure.error?.message ?? `Model broker returned HTTP ${response.status}.`,
+          {
+            code: failure.error?.code ?? "model_review_failed",
+            retryable: failure.error?.retryable ?? response.status >= 500,
+          },
+        );
+      }
+
+      const envelope = requireBrokerResponse(decoded);
+      validateModelOutput(normalized.schema, envelope.output);
+      return {
+        output: envelope.output as T,
+        provider: envelope.provider,
+        model: envelope.model,
+        ...(envelope.usage === undefined ? {} : { usage: envelope.usage }),
+      };
     } finally {
       clearTimeout(timeout);
     }
-
-    const body = await readBoundedResponse(response);
-    let decoded: unknown;
-    try {
-      decoded = JSON.parse(body);
-    } catch {
-      throw new ModelReviewError("Model broker returned malformed JSON.", {
-        code: "invalid_broker_response",
-      });
-    }
-    if (!response.ok) {
-      const failure = decoded as ModelBrokerErrorResponse;
-      throw new ModelReviewError(
-        failure.error?.message ?? `Model broker returned HTTP ${response.status}.`,
-        {
-          code: failure.error?.code ?? "model_review_failed",
-          retryable: failure.error?.retryable ?? response.status >= 500,
-        },
-      );
-    }
-
-    const envelope = requireBrokerResponse(decoded);
-    validateModelOutput(normalized.schema, envelope.output);
-    return {
-      output: envelope.output as T,
-      provider: envelope.provider,
-      model: envelope.model,
-      ...(envelope.usage === undefined ? {} : { usage: envelope.usage }),
-    };
   }
 }
 
-function normalizeRequest(request: ModelReviewRequest): Required<ModelReviewRequest> {
+function modelTimeoutError(timeoutMs: number): ModelReviewError {
+  return new ModelReviewError(`Model review exceeded its ${timeoutMs}ms timeout.`, {
+    code: "model_timeout",
+    retryable: true,
+  });
+}
+
+function normalizeRequest(request: ModelReviewRequest): NormalizedModelReviewRequest {
   if (typeof request !== "object" || request === null) {
     throw new ModelReviewError("Model review request must be an object.", {
       code: "invalid_model_request",
@@ -362,7 +381,7 @@ function validateUsage(value: unknown): asserts value is ModelReviewUsage {
 }
 
 function validateModelOutput(schema: Record<string, unknown>, output: unknown): void {
-  const ajv = new Ajv2020({ allErrors: true, strict: false });
+  const ajv = new Ajv2020({ allErrors: true, strict: true });
   let validate: ReturnType<Ajv2020["compile"]>;
   try {
     validate = ajv.compile(schema);
