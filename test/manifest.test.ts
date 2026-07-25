@@ -27,6 +27,7 @@ permissions:
     read: ["."]
     write: [.adversary/results]
   network: false
+  model: true
   environment:
     allow: [CI]
 findings:
@@ -49,6 +50,14 @@ describe("adversary manifest detection", () => {
     const manifest = parseAdversaryManifest(legacy);
     expect(manifest.permissions?.environment).toEqual({ allow: ["CI"] });
     expect(manifest.permissions).not.toHaveProperty("env");
+  });
+
+  it("parses an explicit model broker permission", () => {
+    const manifest = parseAdversaryManifest(valid);
+    expect(manifest.permissions?.model).toBe(true);
+    expect(() =>
+      parseAdversaryManifest(valid.replace("  model: true", "  model: required")),
+    ).toThrow(ManifestValidationError);
   });
 
   it("rejects ambiguous legacy and canonical environment permissions", () => {
