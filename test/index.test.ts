@@ -397,6 +397,10 @@ describe("review posture and formatOpinion", () => {
     expect(requireOpinionConcern("memory leaks")).toBe("memory leaks");
     expect(isOpinionConcernPhrase("forced exit code 124")).toBe(true);
     expect(isOpinionConcernPhrase("stdout/stderr contract violations")).toBe(true);
+    // Comma-separated list noun phrases remain valid.
+    expect(
+      requireOpinionConcern("cancellation, exit codes, and stream contract issues"),
+    ).toBe("cancellation, exit codes, and stream contract issues");
 
     expect(() => requireOpinionConcern("Command code terminates the process directly")).toThrow(
       /noun phrase/,
@@ -406,6 +410,9 @@ describe("review posture and formatOpinion", () => {
         "commands replace inherited context with context.Background, breaking Ctrl+C",
       ),
     ).toThrow(/noun phrase|headline/);
+    expect(() =>
+      requireOpinionConcern("inherited context replacement, breaking Ctrl+C cancellation"),
+    ).toThrow(/headline|noun phrase/);
     expect(() => requireOpinionConcern("defer os.Exit(124) forces exit code 124")).toThrow(
       /noun phrase/,
     );

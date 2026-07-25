@@ -2011,8 +2011,13 @@ function looksLikeHeadlineNotNounPhrase(concern: string): boolean {
   if (/\bsilently\b/i.test(concern)) {
     return true;
   }
-  // Trailing participial clause after a comma.
-  if (/,/.test(concern)) {
+  // Trailing participial / relative residue after a comma (headline shape).
+  // Allow list noun phrases such as "cancellation, exit codes, and stream issues".
+  if (
+    /,\s+(?:breaking|causing|preventing|leaving|blocking|forcing|overriding|so\b|which\b|and then\b)/i.test(
+      concern,
+    )
+  ) {
     return true;
   }
   return false;
