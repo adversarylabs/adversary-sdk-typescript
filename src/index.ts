@@ -1,6 +1,24 @@
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { Ajv2020, type ValidateFunction } from "ajv/dist/2020.js";
+import { type ReviewModel, createModelFromEnvironment, unavailableModel } from "./model.js";
+
+export {
+  ADVERSARY_MODEL_ENDPOINT_ENV,
+  ADVERSARY_MODEL_PROTOCOL_VERSION,
+  ADVERSARY_MODEL_TOKEN_ENV,
+  BrokerReviewModel,
+  ModelReviewError,
+  ModelUnavailableError,
+  createModelFromEnvironment,
+  unavailableModel,
+  type ModelReviewBudget,
+  type ModelEnvironment,
+  type ModelReviewRequest,
+  type ModelReviewResult,
+  type ModelReviewUsage,
+  type ReviewModel,
+} from "./model.js";
 
 export {
   ADVERSARY_MANIFEST_FILE_NAME,
@@ -373,6 +391,7 @@ export interface RuleContext {
   relpath: (path: string) => string;
   glob: (pattern: string) => Promise<string[]>;
   rglob: (pattern: string) => Promise<string[]>;
+  model: ReviewModel;
   observe: (observation: ObservationInit) => void;
   finding: (finding: FindingInput) => void;
   review: {
@@ -394,6 +413,7 @@ export interface AdversaryOptions {
 
 export interface RunOptions {
   input: RuntimeInput;
+  model?: ReviewModel;
   review?: ReviewPolicy;
   includeSuppressed?: boolean;
   includeRawObservations?: boolean;
@@ -404,6 +424,7 @@ export interface EnvironmentRunOptions {
   input?: RuntimeInput;
   inputPath?: string;
   outputPath?: string;
+  model?: ReviewModel;
   review?: ReviewPolicy;
   includeSuppressed?: boolean;
   includeRawObservations?: boolean;
@@ -579,7 +600,15 @@ export class Adversary {
     const collector = createReviewCollector();
     const registry = this.ruleDefinitions.snapshot();
     const change = normalizeChangeContext(options.input.change);
-    const context = createRuleContext(repoPath, change, summary, cache, collector, registry);
+    const context = createRuleContext(
+      repoPath,
+      change,
+      summary,
+      cache,
+      collector,
+      registry,
+      options.model ?? unavailableModel(),
+    );
     const includeSuppressed = options.includeSuppressed;
 
     for (const rule of this.rules) {
@@ -614,6 +643,7 @@ export class Adversary {
       : (process.env.ADVERSARY_REPO ?? input.source.path);
     const result = await this.run({
       input: { ...input, source: { ...input.source, path: repository } },
+      model: options.model ?? createModelFromEnvironment(),
       review: options.review,
       includeSuppressed:
         options.includeSuppressed ?? parseBooleanEnv(process.env.ADVERSARY_INCLUDE_SUPPRESSED),
@@ -1035,6 +1065,7 @@ function createRuleContext(
   cache: Map<string, unknown>,
   collector: ReviewCollector,
   registry: RuleRegistry,
+  model: ReviewModel,
 ): RuleContext {
   const absoluteRepoPath = resolve(repoPath);
 
@@ -1043,6 +1074,7 @@ function createRuleContext(
     change,
     summary,
     cache,
+    model,
     relpath(path: string): string {
       return relative(absoluteRepoPath, isAbsolute(path) ? path : resolve(absoluteRepoPath, path));
     },

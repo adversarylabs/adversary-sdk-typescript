@@ -9,7 +9,7 @@ and write runtime output.
 ## Install
 
 ```bash
-npm install @adversarylabs/sdk@^0.1.5
+npm install @adversarylabs/sdk@latest
 ```
 
 Requires Node 22 or newer and ESM.
@@ -104,12 +104,64 @@ Rule context exposes:
 - `ctx.relpath(path)`
 - `ctx.glob(pattern)`
 - `ctx.rglob(pattern)`
+- `ctx.model.review(request)`
 - `ctx.observe(observation)`
 - `ctx.finding(finding)`
 - `ctx.review.assessment(assessment)`
 - `ctx.review.positive(note)`
 - `ctx.review.observe(note)`
 - `ctx.review.opinion(opinion)`
+
+### `ctx.model.review(request)`
+
+Model-backed adversaries provide their review prompt, bounded structured input, response schema,
+and output budget. The SDK sends that request to the execution-scoped broker created by the
+Adversary CLI and validates the structured answer before returning it:
+
+```ts
+const review = await ctx.model.review<{
+  decision: "approve" | "request_changes";
+  observations: Array<{ summary: string; evidenceIds: string[] }>;
+}>({
+  prompt: "Review the engineering quality of this change.",
+  input: {
+    change: ctx.change,
+    evidence: preparedEvidence,
+  },
+  schema: {
+    type: "object",
+    additionalProperties: false,
+    required: ["decision", "observations"],
+    properties: {
+      decision: { enum: ["approve", "request_changes"] },
+      observations: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["summary", "evidenceIds"],
+          properties: {
+            summary: { type: "string" },
+            evidenceIds: { type: "array", items: { type: "string" } },
+          },
+        },
+      },
+    },
+  },
+  budget: {
+    maximumOutputTokens: 8_000,
+    timeoutMs: 120_000,
+  },
+});
+```
+
+Declare `permissions.model: true` in `adversary.yaml`. The adversary process receives only a
+short-lived authenticated loopback broker endpoint. Provider credentials, provider selection,
+network transport, retries, and provider-specific response handling remain owned by the CLI.
+
+`app.run({ model })` accepts an injected `ReviewModel` for deterministic unit tests. Calling
+`ctx.model.review(...)` without an injected model or CLI broker throws `ModelUnavailableError`;
+the SDK never silently substitutes deterministic heuristics for model judgment.
 
 ### `ctx.change`
 

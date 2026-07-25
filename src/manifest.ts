@@ -34,6 +34,7 @@ export interface EnvironmentPermissionsManifest {
 export interface PermissionsManifest {
   filesystem?: FilesystemPermissionsManifest;
   network?: boolean;
+  model?: boolean;
   environment?: EnvironmentPermissionsManifest;
   enforcement?: "advisory" | "required";
 }
