@@ -14,6 +14,7 @@ import {
   createAdversaryRunEnvelope,
   defineRule,
   log,
+  normalizeChangeContext,
   normalizeConfidence,
   parseInput,
   rankFindings,
@@ -53,6 +54,124 @@ describe("input loading", () => {
         path: "/repo",
       },
     });
+  });
+
+  it("preserves the change block from the runtime input", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "adversary-sdk-"));
+    const inputPath = join(directory, "input.json");
+    const change = {
+      type: "diff",
+      base_ref: "origin/main",
+      head_ref: "HEAD",
+      scan_mode: "changed",
+      changed_files: ["src/index.ts"],
+    };
+
+    await writeFile(inputPath, JSON.stringify({ source: { path: "/repo" }, change }));
+
+    await expect(parseInput(inputPath)).resolves.toEqual({
+      source: { path: "/repo" },
+      change,
+    });
+  });
+
+  it("accepts a null change block", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "adversary-sdk-"));
+    const inputPath = join(directory, "input.json");
+
+    await writeFile(inputPath, JSON.stringify({ source: { path: "/repo" }, change: null }));
+
+    await expect(parseInput(inputPath)).resolves.toEqual({
+      source: { path: "/repo" },
+      change: null,
+    });
+  });
+
+  it("rejects a malformed change block", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "adversary-sdk-"));
+    const inputPath = join(directory, "input.json");
+
+    await writeFile(
+      inputPath,
+      JSON.stringify({ source: { path: "/repo" }, change: { changed_files: "src/index.ts" } }),
+    );
+
+    await expect(parseInput(inputPath)).rejects.toThrow(
+      "change.changed_files must be an array of strings",
+    );
+  });
+});
+
+describe("change context", () => {
+  it("normalizes wire fields and defaults the scan mode to changed", () => {
+    expect(
+      normalizeChangeContext({
+        type: "diff",
+        base_ref: "origin/main",
+        head_ref: "HEAD",
+        changed_files: ["src/index.ts"],
+      }),
+    ).toEqual({
+      type: "diff",
+      baseRef: "origin/main",
+      headRef: "HEAD",
+      scanMode: "changed",
+      changedFiles: ["src/index.ts"],
+      worktree: false,
+    });
+  });
+
+  it("recognizes the WORKTREE sentinel and the all scan mode", () => {
+    expect(
+      normalizeChangeContext({ base_ref: "HEAD", head_ref: "WORKTREE", scan_mode: "all" }),
+    ).toEqual({
+      baseRef: "HEAD",
+      headRef: "WORKTREE",
+      scanMode: "all",
+      changedFiles: [],
+      worktree: true,
+    });
+  });
+
+  it("returns null for an absent or null change", () => {
+    expect(normalizeChangeContext(undefined)).toBeNull();
+    expect(normalizeChangeContext(null)).toBeNull();
+  });
+
+  it("exposes the normalized change on the rule context", async () => {
+    const app = new Adversary({ name: "adversarylabs/test" });
+    app.rule("scope", (ctx) => {
+      expect(ctx.change).toEqual({
+        type: "diff",
+        baseRef: "origin/main",
+        headRef: "HEAD",
+        scanMode: "changed",
+        changedFiles: ["src/index.ts"],
+        worktree: false,
+      });
+    });
+
+    await app.run({
+      input: {
+        source: { path: process.cwd() },
+        change: {
+          type: "diff",
+          base_ref: "origin/main",
+          head_ref: "HEAD",
+          scan_mode: "changed",
+          changed_files: ["src/index.ts"],
+        },
+      },
+    });
+  });
+
+  it("exposes a null change when the input has none", async () => {
+    const app = new Adversary({ name: "adversarylabs/test" });
+    app.rule("scope", (ctx) => {
+      expect(ctx.change).toBeNull();
+    });
+
+    await app.run({ input: { source: { path: process.cwd() } } });
   });
 });
 

@@ -16,6 +16,37 @@
           "minLength": 1
         }
       }
+    },
+    "change": {
+      "type": ["object", "null"],
+      "additionalProperties": true,
+      "description": "The requested review scope. Null or absent when the runner asked for a full-target review without a change context.",
+      "properties": {
+        "type": {
+          "type": "string",
+          "description": "Change representation reported by the runner; \"diff\" today."
+        },
+        "base_ref": {
+          "type": "string",
+          "description": "Base revision of the reviewed change."
+        },
+        "head_ref": {
+          "type": "string",
+          "description": "Head revision of the reviewed change, or the WORKTREE sentinel for the uncommitted worktree."
+        },
+        "scan_mode": {
+          "type": "string",
+          "enum": ["changed", "all"],
+          "description": "\"changed\" restricts review to the change; \"all\" requests the entire target."
+        },
+        "changed_files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Repository-relative paths the runner identified as changed."
+        }
+      }
     }
   }
 }

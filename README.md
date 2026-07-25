@@ -98,6 +98,7 @@ Registers a rule. Rules report through `ctx.observe(...)`, `ctx.finding(...)`, a
 Rule context exposes:
 
 - `ctx.repoPath`
+- `ctx.change`
 - `ctx.summary`
 - `ctx.cache`
 - `ctx.relpath(path)`
@@ -109,6 +110,30 @@ Rule context exposes:
 - `ctx.review.positive(note)`
 - `ctx.review.observe(note)`
 - `ctx.review.opinion(opinion)`
+
+### `ctx.change`
+
+The requested review scope, normalized from the runtime input's `change` block. Honor it instead
+of inferring scope from Git state: the runner has already resolved what should be reviewed.
+
+- `null` — review the entire target; the runner provided no change context (for example
+  `--all-files` with no refs, or a non-Git target).
+- `scanMode: "all"` — review the entire target; change metadata is still available.
+- `scanMode: "changed"` — review only the change from `baseRef` to `headRef`.
+
+`changedFiles` lists the repository-relative paths the runner identified as changed. `worktree` is
+true when the reviewed head is the uncommitted worktree (`headRef` is the `WORKTREE` sentinel,
+exported as `WORKTREE_HEAD_REF`).
+
+```ts
+app.rule("scoped", async (ctx) => {
+  if (ctx.change === null || ctx.change.scanMode === "all") {
+    // Review every file in ctx.repoPath.
+  } else {
+    // Review only ctx.change.changedFiles against ctx.change.baseRef.
+  }
+});
+```
 
 ### `app.defineRule(definition)`
 
