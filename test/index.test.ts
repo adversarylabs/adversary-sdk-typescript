@@ -1054,13 +1054,14 @@ describe("review pipeline", () => {
 
     expect(terminal).toContain("Scores\n\nProduction readiness: 8.8 / 10 - Ready");
     expect(terminal).toContain("Positive signals\n\n- The implementation is easy to scan.");
-    expect(terminal).toContain(
-      "Additional observations\n\n- Some comments are complete sentences.",
-    );
+    expect(terminal).toContain("Observations\n\n- Some comments are complete sentences.");
     expect(terminal).toContain(
       "Overall opinion\n\nI would ship this as-is. Comment cleanup is the only improvement I would recommend before production.",
     );
     expect(terminal).not.toContain("as-is.\n\nComment cleanup");
+    expect(terminal).not.toContain("Scan complete");
+    expect(terminal).not.toContain("Primary opportunity");
+    expect(terminal).not.toContain("Additional observations");
   });
 
   it("renders synthesized structured evidence without leaking raw metadata", async () => {
@@ -1149,13 +1150,8 @@ describe("review pipeline", () => {
       "Recommendation\n\nKeep complete-sentence comments only when they explain non-obvious intent. Remove comments that simply restate nearby code.",
     );
     expect(result.findings[0]?.remediation).toEqual({ complexity: "trivial" });
-    expect(
-      terminal
-        .trimEnd()
-        .endsWith(
-          "Recommendation\n\nKeep complete-sentence comments only when they explain non-obvious intent. Remove comments that simply restate nearby code.",
-        ),
-    ).toBe(true);
+    expect(terminal.trimEnd().endsWith("Findings: 1")).toBe(true);
+    expect(terminal).toContain("Findings (1)");
     expect(terminal).not.toContain('"comment"');
     expect(terminal).not.toContain("[{");
     expect(terminal).not.toContain("parser");
@@ -1509,10 +1505,13 @@ describe("review pipeline", () => {
       "I would ship this as-is. Removing complete-sentence comments that restate nearby code is the only improvement I would recommend before shipping.",
     );
     expect(terminal).not.toContain("Additional observations");
-    expect(terminal).not.toMatch(/SDK|observations|grouping|synthesis|rendering/i);
+    expect(terminal).not.toContain("Primary opportunity");
+    expect(terminal).not.toContain("Scan complete");
+    expect(terminal).not.toMatch(/SDK|grouping|synthesis|rendering/i);
     expect(terminal).toMatchInlineSnapshot(`
       "Adversary: comment-review
       Repository: /repo
+      Files scanned: 1
 
       Overall assessment
 
@@ -1520,23 +1519,9 @@ describe("review pipeline", () => {
 
       Comments are concentrated near the parsing flow. The only material concern identified is that the three comments in src/index.ts are complete sentences.
 
-      Positive signals
+      Findings (1)
 
-      - Comments are concentrated near the parsing flow.
-      - Intent-revealing comments are separated from implementation details.
-
-      Primary opportunity
-
-      - Comments are complete sentences.
-
-      Overall opinion
-
-      I would ship this as-is. Removing complete-sentence comments that restate nearby code is the only improvement I would recommend before shipping.
-
-      Scan complete
-
-      Files scanned: 1
-      Findings: 1
+      - [low] Comments are complete sentences (3 sites)
 
       [low] Comments are complete sentences
       src/index.ts:3
@@ -1568,8 +1553,74 @@ describe("review pipeline", () => {
       Recommendation
 
       Remove complete-sentence comments that restate nearby code.
+
+      Positive signals
+
+      - Comments are concentrated near the parsing flow.
+      - Intent-revealing comments are separated from implementation details.
+
+      Overall opinion
+
+      I would ship this as-is. Removing complete-sentence comments that restate nearby code is the only improvement I would recommend before shipping.
+
+      Findings: 1
       "
     `);
+  });
+
+  it("demotes context observations and caps evidence in terminal output", async () => {
+    const app = new Adversary({
+      name: "go-cli",
+      review: { minimumConfidence: "low" },
+    });
+    app.rule("lifecycle", (ctx) => {
+      ctx.summary.files_scanned = 436;
+      ctx.review.observe({
+        key: "go-cli.analysis",
+        summary: "Prepared 436 Go CLI files in repository review mode.",
+      });
+      ctx.review.observe({
+        key: "prep",
+        summary: "Internal prep note",
+        metadata: { role: "context" },
+      });
+      ctx.review.observe({
+        key: "stage-layout",
+        summary: "Commands share a root error mapper.",
+      });
+      ctx.finding({
+        title: "Command code terminates the process directly",
+        category: "correctness",
+        severity: "high",
+        confidence: "high",
+        summary: "Several paths call os.Exit.",
+        evidence: Array.from({ length: 7 }, (_, index) => ({
+          file: "cmd/root.go",
+          line: index + 1,
+          message: `site ${index + 1}`,
+          snippet: "os.Exit(1)",
+        })),
+        recommendation: "Map errors in main.",
+      });
+    });
+
+    const result = await app.run({
+      input: { source: { path: "/Users/marc/go/src/github.com/replicatedhq/replicated" } },
+    });
+    let terminal = "";
+    new TerminalRenderer((text) => {
+      terminal += text;
+    }).render(result);
+
+    expect(terminal).toContain("Repository: replicatedhq/replicated");
+    expect(terminal).toContain("Files scanned: 436");
+    expect(terminal).toContain("- [high] Command code terminates the process directly (7 sites)");
+    expect(terminal).toContain("- … and 2 more");
+    expect(terminal).toContain("Commands share a root error mapper.");
+    expect(terminal).not.toContain("Prepared 436 Go CLI files");
+    expect(terminal).not.toContain("Internal prep note");
+    expect(terminal).not.toContain("site 6");
+    expect(terminal).not.toContain("Scan complete");
   });
 
   it("uses the rule aggregate through the built package process boundary", async () => {

@@ -424,6 +424,14 @@ new TerminalRenderer().render(result);
 new JsonRenderer().render(result);
 ```
 
+`TerminalRenderer` uses the same product layout as the adversary CLI text
+report: header (adversary, shortened repository, files scanned) → overall
+assessment → finding index → finding detail (evidence capped) → positives →
+scores → observations → overall opinion → findings footer. Prep/context notes
+(keys ending in `.analysis`, `metadata.role: "context"`, or “Prepared … files”
+summaries) are omitted from the Observations section. JSON output remains the
+full structured result.
+
 Adversary implementations should not manually format review output.
 
 ### Canonical wire evidence

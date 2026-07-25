@@ -822,16 +822,27 @@ export class JsonRenderer implements ReviewRenderer {
   }
 }
 
+/** Maximum evidence items shown per finding in text mode. JSON keeps the full list. */
+const TERMINAL_MAX_EVIDENCE = 5;
+
 export class TerminalRenderer implements ReviewRenderer {
   constructor(
     private readonly write: (text: string) => void = (text) => process.stdout.write(text),
   ) {}
 
+  /**
+   * Product text report layout (aligned with the adversary CLI renderer):
+   * header → assessment → finding index → finding detail → positives →
+   * scores → observations → opinion → stats footer.
+   */
   render(result: ReviewResult): void {
     const lines: string[] = [];
     lines.push(`Adversary: ${result.adversary.name}`);
     if (result.target.repository !== undefined) {
-      lines.push(`Repository: ${result.target.repository}`);
+      lines.push(`Repository: ${shortenRepositoryPath(result.target.repository)}`);
+    }
+    if (result.target.filesScanned !== undefined) {
+      lines.push(`Files scanned: ${result.target.filesScanned}`);
     }
     lines.push("");
 
@@ -843,15 +854,25 @@ export class TerminalRenderer implements ReviewRenderer {
       }
     }
 
-    const scoreNotes = result.observations.filter(isScoreReviewNote);
-    const additionalObservations = result.observations.filter((note) => !isScoreReviewNote(note));
-
-    if (scoreNotes.length > 0) {
-      lines.push("Scores", "");
-      for (const note of scoreNotes) {
-        lines.push(note.summary);
+    if (result.findings.length > 0) {
+      lines.push(`Findings (${result.findings.length})`, "");
+      for (const finding of result.findings) {
+        const sites = finding.evidence.length;
+        lines.push(
+          sites > 0
+            ? `- [${finding.severity}] ${finding.title} (${evidenceCountLabel(sites)})`
+            : `- [${finding.severity}] ${finding.title}`,
+        );
       }
       lines.push("");
+    }
+
+    for (const finding of result.findings) {
+      appendTerminalFinding(lines, finding);
+    }
+
+    for (const finding of result.suppressedFindings ?? []) {
+      appendTerminalFinding(lines, finding, "suppressed; reason unavailable");
     }
 
     if (result.positives.length > 0) {
@@ -862,64 +883,113 @@ export class TerminalRenderer implements ReviewRenderer {
       lines.push("");
     }
 
+    const scoreNotes = result.observations.filter(isScoreReviewNote);
+    const additionalObservations = reviewObservationsForTerminal(
+      result.observations.filter((note) => !isScoreReviewNote(note)),
+    );
+
+    if (scoreNotes.length > 0) {
+      lines.push("Scores", "");
+      for (const note of scoreNotes) {
+        lines.push(note.summary);
+      }
+      lines.push("");
+    }
+
     if (additionalObservations.length > 0) {
-      lines.push("Additional observations", "");
+      lines.push("Observations", "");
       for (const observation of additionalObservations) {
         lines.push(`- ${normalizeParagraph(observation.summary)}`);
       }
       lines.push("");
     }
 
-    const primary = result.findings[0];
-    if (primary !== undefined) {
-      lines.push("Primary opportunity", "");
-      lines.push(`- ${primary.title.endsWith(".") ? primary.title : `${primary.title}.`}`, "");
-    }
-
     if (result.opinion !== undefined) {
       lines.push("Overall opinion", "", normalizeParagraph(result.opinion.summary), "");
     }
 
-    lines.push("Scan complete", "");
-    if (result.target.filesScanned !== undefined) {
-      lines.push(`Files scanned: ${result.target.filesScanned}`);
+    lines.push(`Findings: ${result.findings.length}`);
+    if (result.suppressed.observations > 0) {
+      lines.push(`Suppressed observations: ${result.suppressed.observations}`);
     }
-    lines.push(`Findings: ${result.findings.length}`, "");
-
-    for (const finding of result.findings) {
-      lines.push(`[${finding.severity}] ${finding.title}`);
-      const firstEvidence = finding.evidence.find((item) => item.location?.file !== undefined);
-      if (firstEvidence?.location?.file !== undefined) {
-        lines.push(formatEvidenceLocation(firstEvidence));
-      }
-      lines.push("");
-      lines.push(`Category: ${finding.category}`);
-      lines.push(`Confidence: ${finding.confidence}`, "");
-      lines.push("Summary", "", finding.summary, "");
-
-      if (finding.whyItMatters !== undefined) {
-        lines.push("Why it matters", "", finding.whyItMatters, "");
-      }
-
-      if (finding.impact !== undefined) {
-        lines.push("Impact", "", finding.impact, "");
-      }
-
-      if (finding.evidence.length > 0) {
-        lines.push("Evidence", "");
-        for (const evidence of finding.evidence) {
-          lines.push(...formatEvidenceLines(evidence));
-        }
-        lines.push("");
-      }
-
-      if (finding.recommendation !== undefined) {
-        lines.push("Recommendation", "", normalizeParagraph(finding.recommendation), "");
-      }
+    if (result.suppressed.findings > 0) {
+      lines.push(`Suppressed findings: ${result.suppressed.findings}`);
     }
 
     this.write(`${lines.join("\n").trimEnd()}\n`);
   }
+}
+
+function appendTerminalFinding(lines: string[], finding: ReviewFinding, qualifier?: string): void {
+  const label = qualifier === undefined ? finding.severity : `${finding.severity}; ${qualifier}`;
+  lines.push(`[${label}] ${finding.title}`);
+  const firstEvidence = finding.evidence.find((item) => item.location?.file !== undefined);
+  if (firstEvidence?.location?.file !== undefined) {
+    lines.push(formatEvidenceLocation(firstEvidence));
+  }
+  lines.push("");
+  lines.push(`Category: ${finding.category}`);
+  lines.push(`Confidence: ${finding.confidence}`, "");
+  lines.push("Summary", "", finding.summary, "");
+
+  if (finding.whyItMatters !== undefined) {
+    lines.push("Why it matters", "", finding.whyItMatters, "");
+  }
+
+  if (finding.impact !== undefined) {
+    lines.push("Impact", "", finding.impact, "");
+  }
+
+  if (finding.evidence.length > 0) {
+    lines.push("Evidence", "");
+    const shown = finding.evidence.slice(0, TERMINAL_MAX_EVIDENCE);
+    const remaining = finding.evidence.length - shown.length;
+    for (const evidence of shown) {
+      lines.push(...formatEvidenceLines(evidence));
+    }
+    if (remaining > 0) {
+      lines.push(`- … and ${remaining} more`);
+    }
+    lines.push("");
+  }
+
+  if (finding.recommendation !== undefined) {
+    lines.push("Recommendation", "", normalizeParagraph(finding.recommendation), "");
+  }
+}
+
+function reviewObservationsForTerminal(notes: ReviewNote[]): ReviewNote[] {
+  return notes.filter((note) => !isContextObservation(note));
+}
+
+function isContextObservation(note: ReviewNote): boolean {
+  const key = note.key.trim().toLowerCase();
+  if (key.endsWith(".analysis") || key === "analysis") {
+    return true;
+  }
+  const role = note.metadata?.role;
+  if (typeof role === "string" && role.toLowerCase() === "context") {
+    return true;
+  }
+  const summary = note.summary.trim().toLowerCase();
+  return summary.startsWith("prepared ") && summary.includes(" file");
+}
+
+function shortenRepositoryPath(path: string): string {
+  const trimmed = path.trim();
+  if (trimmed.length === 0) {
+    return trimmed;
+  }
+  const normalized = trimmed.replaceAll("\\", "/");
+  const segments = normalized.split("/").filter((part) => part.length > 0);
+  if (segments.length <= 2) {
+    return trimmed;
+  }
+  return `${segments[segments.length - 2]}/${segments[segments.length - 1]}`;
+}
+
+function evidenceCountLabel(n: number): string {
+  return n === 1 ? "1 site" : `${n} sites`;
 }
 
 export function normalizeChangeContext(
