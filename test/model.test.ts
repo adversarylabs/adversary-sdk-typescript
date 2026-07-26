@@ -1,5 +1,8 @@
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   ADVERSARY_MODEL_PROTOCOL_VERSION,
@@ -72,6 +75,18 @@ describe("model review capability", () => {
         schema: { type: "object" },
       }),
     ).rejects.toBeInstanceOf(ModelUnavailableError);
+  });
+
+  it("requires repository tools to run through a rule-context model", async () => {
+    const model = new BrokerReviewModel("http://127.0.0.1:43123/v1/review", "secret");
+    await expect(
+      model.review({
+        prompt: "Review.",
+        input: {},
+        schema: { type: "object" },
+        tools: { repository: {} },
+      }),
+    ).rejects.toMatchObject<ModelReviewError>({ code: "invalid_model_request" });
   });
 
   it("uses the authenticated loopback broker and validates its structured output", async () => {
@@ -177,6 +192,205 @@ describe("model review capability", () => {
         budget: { timeoutMs: 25 },
       }),
     ).rejects.toMatchObject<ModelReviewError>({ code: "model_timeout", retryable: true });
+  });
+
+  it("retrieves repository evidence through bounded planning rounds", async () => {
+    const root = await mkdtemp(join(tmpdir(), "adversary-sdk-repository-tools-"));
+    try {
+      await mkdir(join(root, "src"));
+      await writeFile(
+        join(root, "src", "index.ts"),
+        "export function important(): string {\n  return 'prepared evidence';\n}\n",
+      );
+      let planningCalls = 0;
+      let finalInput: unknown;
+      const model: ReviewModel = {
+        async review<T>(request: ModelReviewRequest) {
+          const properties = request.schema.properties as Record<string, unknown> | undefined;
+          if (properties?.ready !== undefined) {
+            planningCalls += 1;
+            const encoded = JSON.stringify(request.input);
+            if (planningCalls === 1) {
+              expect(encoded).not.toContain("prepared evidence");
+              return {
+                output: {
+                  ready: false,
+                  operations: [
+                    {
+                      tool: "list_directory",
+                      path: "src",
+                      cursor: 0,
+                      startLine: 0,
+                      endLine: 0,
+                    },
+                  ],
+                } as T,
+                provider: "fixture",
+                model: "planner",
+                usage: { inputTokens: 1, outputTokens: 1 },
+              };
+            }
+            if (planningCalls === 2) {
+              expect(encoded).toContain("src/index.ts");
+              return {
+                output: {
+                  ready: false,
+                  operations: [
+                    {
+                      tool: "read_file",
+                      path: "src/index.ts",
+                      cursor: 0,
+                      startLine: 1,
+                      endLine: 3,
+                    },
+                  ],
+                } as T,
+                provider: "fixture",
+                model: "planner",
+                usage: { inputTokens: 1, outputTokens: 1 },
+              };
+            }
+            expect(encoded).toContain("repo:read:1");
+            expect(encoded).toContain("prepared evidence");
+            return {
+              output: { ready: true, operations: [] } as T,
+              provider: "fixture",
+              model: "planner",
+              usage: { inputTokens: 1, outputTokens: 1 },
+            };
+          }
+          finalInput = request.input;
+          return {
+            output: { verdict: "approve" } as T,
+            provider: "fixture",
+            model: "reviewer",
+            usage: { inputTokens: 2, outputTokens: 2 },
+          };
+        },
+      };
+      const app = new Adversary({ name: "adversarylabs/repository-tools" });
+      let reviewResult: Awaited<ReturnType<ReviewModel["review"]>> | undefined;
+      app.rule("review", async (ctx) => {
+        reviewResult = await ctx.model.review({
+          prompt: "Review the implementation.",
+          input: { change: "all files" },
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            required: ["verdict"],
+            properties: { verdict: { const: "approve" } },
+          },
+          tools: {
+            repository: {
+              include: ["**/*.ts"],
+              maxRounds: 4,
+              maxToolCalls: 4,
+            },
+          },
+        });
+      });
+
+      await app.run({ input: { source: { path: root } }, model });
+
+      expect(planningCalls).toBe(3);
+      expect(JSON.stringify(finalInput)).toContain("prepared evidence");
+      expect(reviewResult?.citations).toEqual([
+        {
+          citationId: "repo:read:1",
+          path: "src/index.ts",
+          startLine: 1,
+          endLine: 3,
+          content: "export function important(): string {\n  return 'prepared evidence';\n}",
+        },
+      ]);
+      expect(reviewResult?.retrieval).toMatchObject({
+        rounds: 3,
+        toolCalls: 2,
+        filesRead: 1,
+        directoriesListed: 2,
+        exhausted: false,
+      });
+      expect(reviewResult?.usage).toEqual({ inputTokens: 5, outputTokens: 5 });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("blocks repository traversal and symbolic-link reads", async () => {
+    const root = await mkdtemp(join(tmpdir(), "adversary-sdk-repository-safety-"));
+    const outside = await mkdtemp(join(tmpdir(), "adversary-sdk-repository-secret-"));
+    try {
+      await writeFile(join(outside, "secret.ts"), "do not disclose");
+      await symlink(join(outside, "secret.ts"), join(root, "linked.ts"));
+      let planningCalls = 0;
+      let finalInput: unknown;
+      const model: ReviewModel = {
+        async review<T>(request: ModelReviewRequest) {
+          const properties = request.schema.properties as Record<string, unknown> | undefined;
+          if (properties?.ready !== undefined) {
+            planningCalls += 1;
+            return {
+              output:
+                planningCalls === 1
+                  ? {
+                      ready: false,
+                      operations: [
+                        {
+                          tool: "read_file",
+                          path: "../secret.ts",
+                          cursor: 0,
+                          startLine: 1,
+                          endLine: 20,
+                        },
+                        {
+                          tool: "read_file",
+                          path: "linked.ts",
+                          cursor: 0,
+                          startLine: 1,
+                          endLine: 20,
+                        },
+                      ],
+                    }
+                  : ({ ready: true, operations: [] } as T),
+              provider: "fixture",
+              model: "planner",
+            };
+          }
+          finalInput = request.input;
+          return {
+            output: { verdict: "approve" } as T,
+            provider: "fixture",
+            model: "reviewer",
+          };
+        },
+      };
+      const app = new Adversary({ name: "adversarylabs/repository-safety" });
+      let citations: readonly unknown[] | undefined;
+      app.rule("review", async (ctx) => {
+        const result = await ctx.model.review({
+          prompt: "Review safely.",
+          input: {},
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            required: ["verdict"],
+            properties: { verdict: { const: "approve" } },
+          },
+          tools: { repository: { include: ["**/*.ts"] } },
+        });
+        citations = result.citations;
+      });
+
+      await app.run({ input: { source: { path: root } }, model });
+
+      expect(citations).toEqual([]);
+      expect(JSON.stringify(finalInput)).not.toContain("do not disclose");
+      expect(JSON.stringify(finalInput)).toContain("repository-relative path");
+      expect(JSON.stringify(finalInput)).toContain("symbolic link");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
   });
 
   it("accepts bracketed IPv6 loopback endpoints", () => {
