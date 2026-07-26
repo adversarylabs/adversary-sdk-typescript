@@ -1,6 +1,6 @@
 {
   "name": "@adversarylabs/sdk",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "description": "Small TypeScript SDK for authoring Adversaries.",
   "type": "module",
   "license": "MIT",
@@ -26,7 +26,12 @@
     "./schemas/adversary.input.v1": "./schemas/adversary.input.v1.schema.json",
     "./schemas/adversary.review.v1": "./schemas/adversary.review.v1.schema.json"
   },
-  "files": ["dist", "schemas", "templates", "README.md"],
+  "files": [
+    "dist",
+    "schemas",
+    "templates",
+    "README.md"
+  ],
   "engines": {
     "node": ">=22"
   },
