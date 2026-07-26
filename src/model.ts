@@ -1,4 +1,9 @@
 import { Ajv2020 } from "ajv/dist/2020.js";
+import type {
+  ModelRepositoryCitation,
+  ModelRepositoryRetrieval,
+  ModelRepositoryToolOptions,
+} from "./repository-model.js";
 
 export const ADVERSARY_MODEL_PROTOCOL_VERSION = 1;
 export const ADVERSARY_MODEL_ENDPOINT_ENV = "ADVERSARY_MODEL_ENDPOINT";
@@ -23,6 +28,9 @@ export interface ModelReviewRequest {
   input: unknown;
   schema: Record<string, unknown>;
   budget?: ModelReviewBudget;
+  tools?: {
+    repository: ModelRepositoryToolOptions;
+  };
 }
 
 export interface ModelReviewUsage {
@@ -35,6 +43,8 @@ export interface ModelReviewResult<T = unknown> {
   provider: string;
   model: string;
   usage?: ModelReviewUsage;
+  citations?: readonly ModelRepositoryCitation[];
+  retrieval?: ModelRepositoryRetrieval;
 }
 
 export interface ReviewModel {
@@ -163,6 +173,12 @@ export class BrokerReviewModel implements ReviewModel {
   }
 
   async review<T = unknown>(request: ModelReviewRequest): Promise<ModelReviewResult<T>> {
+    if (request.tools?.repository !== undefined) {
+      throw new ModelReviewError(
+        "Repository model tools require ctx.model so the SDK can enforce the repository boundary.",
+        { code: "invalid_model_request" },
+      );
+    }
     const normalized = normalizeRequest(request);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), normalized.budget.timeoutMs);

@@ -155,6 +155,56 @@ const review = await ctx.model.review<{
 });
 ```
 
+For repository-scale reviews, add bounded repository tools instead of placing source bodies in
+`input`. The SDK asks the model which directories and line ranges it needs, performs those reads
+inside the rule context's repository boundary, and then makes the final structured review call:
+
+```ts
+const review = await ctx.model.review<EngineeringReview>({
+  prompt: ENGINEERING_REVIEW_PROMPT,
+  input: {
+    change: ctx.change,
+    repositoryPurpose: "Go command-line adversary",
+  },
+  schema: engineeringReviewSchema,
+  tools: {
+    repository: {
+      include: ["*.ts", "**/*.ts", "*.json"],
+      exclude: ["fixtures/**", "generated/**"],
+      maxRounds: 6,
+      maxToolCalls: 24,
+      maxTotalBytes: 256_000,
+      maxBytesPerRead: 32_000,
+      maxLinesPerRead: 400,
+    },
+  },
+  budget: {
+    maximumOutputTokens: 6_000,
+    timeoutMs: 300_000,
+  },
+});
+```
+
+Repository retrieval provides paginated `list_directory` and line-range `read_file` operations.
+Reads are repository-relative, read-only, symlink-safe, glob-constrained, and bounded by call,
+round, line, and byte budgets. Each successful read creates an immutable citation:
+
+```ts
+review.citations?.[0];
+// {
+//   citationId: "repo:read:1",
+//   path: "src/index.ts",
+//   startLine: 20,
+//   endLine: 80,
+//   content: "..."
+// }
+```
+
+The final model input contains the original value under `reviewInput` and the prepared tool
+results under `repository.toolResults`. Final output schemas should cite the supplied
+`citationId` and a line inside its inclusive range. The SDK never exposes arbitrary shell tools,
+follows repository symlinks, or sends provider credentials into the adversary process.
+
 Declare `permissions.model: true` in `adversary.yaml`. The adversary process receives only a
 short-lived authenticated loopback broker endpoint. Provider credentials, provider selection,
 network transport, retries, and provider-specific response handling remain owned by the CLI.

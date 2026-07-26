@@ -11,6 +11,7 @@ import {
   createModelFromEnvironment,
   unavailableModel,
 } from "./model.js";
+import { reviewWithRepositoryTools } from "./repository-model.js";
 
 export {
   ADVERSARY_MODEL_ENDPOINT_ENV,
@@ -31,6 +32,12 @@ export {
   type ModelReviewUsage,
   type ReviewModel,
 } from "./model.js";
+export type {
+  ModelRepositoryCitation,
+  ModelRepositoryRetrieval,
+  ModelRepositoryToolOptions,
+} from "./repository-model.js";
+export { resolveModelCitation } from "./repository-model.js";
 
 export {
   ADVERSARY_MANIFEST_FILE_NAME,
@@ -1097,7 +1104,7 @@ function createRuleContext(
     change,
     summary,
     cache,
-    model: enhanceReviewModel(model),
+    model: enhanceReviewModel(model, absoluteRepoPath),
     relpath(path: string): string {
       return relative(absoluteRepoPath, isAbsolute(path) ? path : resolve(absoluteRepoPath, path));
     },
@@ -1889,9 +1896,15 @@ export async function formatOpinionAsync(
 }
 
 /** Attach {@link ContextualReviewModel.concern} on top of any injectable ReviewModel. */
-export function enhanceReviewModel(model: ReviewModel): ContextualReviewModel {
+export function enhanceReviewModel(
+  model: ReviewModel,
+  repositoryRoot?: string,
+): ContextualReviewModel {
   return {
-    review: (request) => model.review(request),
+    review: (request) =>
+      request.tools?.repository === undefined
+        ? model.review(request)
+        : reviewWithRepositoryTools(model, repositoryRoot, request),
     concern: (request) => rewriteOpinionConcern(model, request),
   };
 }
