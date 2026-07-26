@@ -211,6 +211,8 @@ describe("model review capability", () => {
             planningCalls += 1;
             const encoded = JSON.stringify(request.input);
             if (planningCalls === 1) {
+              expect(request.prompt).toContain("at most 8 operations");
+              expect(JSON.stringify(request.schema)).toContain('"maxItems":8');
               expect(encoded).not.toContain("prepared evidence");
               return {
                 output: {
@@ -311,6 +313,62 @@ describe("model review capability", () => {
         exhausted: false,
       });
       expect(reviewResult?.usage).toEqual({ inputTokens: 5, outputTokens: 5 });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects repository plans that exceed the per-round operation bound", async () => {
+    const root = await mkdtemp(join(tmpdir(), "adversary-sdk-repository-plan-bound-"));
+    try {
+      await writeFile(join(root, "index.ts"), "export const value = true;\n");
+      const model: ReviewModel = {
+        async review<T>(request: ModelReviewRequest) {
+          const properties = request.schema.properties as Record<string, unknown> | undefined;
+          if (properties?.ready !== undefined) {
+            return {
+              output: {
+                ready: false,
+                operations: Array.from({ length: 9 }, (_, index) => ({
+                  tool: "read_file",
+                  path: "index.ts",
+                  cursor: 0,
+                  startLine: index + 1,
+                  endLine: index + 1,
+                })),
+              } as T,
+              provider: "fixture",
+              model: "planner",
+            };
+          }
+          return {
+            output: { verdict: "approve" } as T,
+            provider: "fixture",
+            model: "reviewer",
+          };
+        },
+      };
+      const app = new Adversary({ name: "adversarylabs/repository-plan-bound" });
+      app.rule("review", async (ctx) => {
+        await ctx.model.review({
+          prompt: "Review safely.",
+          input: {},
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            required: ["verdict"],
+            properties: { verdict: { const: "approve" } },
+          },
+          tools: { repository: { include: ["**/*.ts"] } },
+        });
+      });
+
+      await expect(
+        app.run({ input: { source: { path: root } }, model }),
+      ).rejects.toMatchObject<ModelReviewError>({
+        code: "invalid_model_output",
+        retryable: true,
+      });
     } finally {
       await rm(root, { recursive: true, force: true });
     }
