@@ -316,6 +316,124 @@ describe("model review capability", () => {
     }
   });
 
+  it("paginates repository listings before reading a selected file", async () => {
+    const root = await mkdtemp(join(tmpdir(), "adversary-sdk-repository-pages-"));
+    try {
+      for (let index = 1; index <= 5; index += 1) {
+        await writeFile(join(root, `file-${index}.ts`), `export const value${index} = ${index};\n`);
+      }
+      let planningCalls = 0;
+      const model: ReviewModel = {
+        async review<T>(request: ModelReviewRequest) {
+          const properties = request.schema.properties as Record<string, unknown> | undefined;
+          if (properties?.ready === undefined) {
+            return {
+              output: { verdict: "approve" } as T,
+              provider: "fixture",
+              model: "reviewer",
+            };
+          }
+          planningCalls += 1;
+          const encoded = JSON.stringify(request.input);
+          if (planningCalls === 1) {
+            expect(encoded).toContain('"nextCursor":2');
+            expect(encoded).not.toContain("file-3.ts");
+            return {
+              output: {
+                ready: false,
+                operations: [
+                  {
+                    tool: "list_directory",
+                    path: ".",
+                    cursor: 2,
+                    startLine: 0,
+                    endLine: 0,
+                  },
+                ],
+              } as T,
+              provider: "fixture",
+              model: "planner",
+            };
+          }
+          if (planningCalls === 2) {
+            expect(encoded).toContain("file-3.ts");
+            expect(encoded).toContain('"nextCursor":4');
+            return {
+              output: {
+                ready: false,
+                operations: [
+                  {
+                    tool: "list_directory",
+                    path: ".",
+                    cursor: 4,
+                    startLine: 0,
+                    endLine: 0,
+                  },
+                ],
+              } as T,
+              provider: "fixture",
+              model: "planner",
+            };
+          }
+          if (planningCalls === 3) {
+            expect(encoded).toContain("file-5.ts");
+            return {
+              output: {
+                ready: false,
+                operations: [
+                  {
+                    tool: "read_file",
+                    path: "file-5.ts",
+                    cursor: 0,
+                    startLine: 1,
+                    endLine: 1,
+                  },
+                ],
+              } as T,
+              provider: "fixture",
+              model: "planner",
+            };
+          }
+          expect(encoded).toContain("export const value5 = 5;");
+          return {
+            output: { ready: true, operations: [] } as T,
+            provider: "fixture",
+            model: "planner",
+          };
+        },
+      };
+      const app = new Adversary({ name: "adversarylabs/repository-pages" });
+      let citations: readonly { path: string }[] | undefined;
+      app.rule("review", async (ctx) => {
+        const result = await ctx.model.review({
+          prompt: "Review a selected file.",
+          input: {},
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            required: ["verdict"],
+            properties: { verdict: { const: "approve" } },
+          },
+          tools: {
+            repository: {
+              include: ["**/*.ts"],
+              directoryPageSize: 2,
+              maxRounds: 5,
+            },
+          },
+        });
+        citations = result.citations;
+      });
+
+      await app.run({ input: { source: { path: root } }, model });
+
+      expect(planningCalls).toBe(4);
+      expect(citations).toMatchObject([{ path: "file-5.ts" }]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("blocks repository traversal and symbolic-link reads", async () => {
     const root = await mkdtemp(join(tmpdir(), "adversary-sdk-repository-safety-"));
     const outside = await mkdtemp(join(tmpdir(), "adversary-sdk-repository-secret-"));
