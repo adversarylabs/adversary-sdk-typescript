@@ -12,6 +12,10 @@ import {
   unavailableModel,
 } from "./model.js";
 import { reviewWithRepositoryTools } from "./repository-model.js";
+import {
+  type RepoIndex,
+  repoIndexFromEnvironment,
+} from "./repo-index.js";
 
 export {
   ADVERSARY_MODEL_ENDPOINT_ENV,
@@ -38,6 +42,19 @@ export type {
   ModelRepositoryToolOptions,
 } from "./repository-model.js";
 export { resolveModelCitation } from "./repository-model.js";
+
+export {
+  ADVERSARY_REPO_INDEX_ENV,
+  REPO_INDEX_SCHEMA_VERSION,
+  openRepoIndex,
+  repoIndexFromEnvironment,
+  RepoIndexUnavailableError,
+  type ListFilesOptions,
+  type RepoIndex,
+  type RepoIndexEdge,
+  type RepoIndexFile,
+  type RepoIndexMeta,
+} from "./repo-index.js";
 
 export {
   ADVERSARY_MANIFEST_FILE_NAME,
@@ -412,6 +429,11 @@ export interface RuleContext {
    * with change metadata available ("all").
    */
   change: ChangeContext | null;
+  /**
+   * CLI-built local repository index for cross-file navigation (imports /
+   * importers). Null when the CLI did not inject ADVERSARY_REPO_INDEX.
+   */
+  repoIndex: RepoIndex | null;
   summary: Summary;
   cache: Map<string, unknown>;
   relpath: (path: string) => string;
@@ -444,6 +466,8 @@ export interface AdversaryOptions {
 export interface RunOptions {
   input: RuntimeInput;
   model?: ReviewModel;
+  /** Optional repo index; defaults to loading ADVERSARY_REPO_INDEX when unset. */
+  repoIndex?: RepoIndex | null;
   review?: ReviewPolicy;
   includeSuppressed?: boolean;
   includeRawObservations?: boolean;
@@ -630,6 +654,10 @@ export class Adversary {
     const collector = createReviewCollector();
     const registry = this.ruleDefinitions.snapshot();
     const change = normalizeChangeContext(options.input.change);
+    const repoIndex =
+      options.repoIndex !== undefined
+        ? options.repoIndex
+        : await repoIndexFromEnvironment();
     const context = createRuleContext(
       repoPath,
       change,
@@ -638,6 +666,7 @@ export class Adversary {
       collector,
       registry,
       options.model ?? unavailableModel(),
+      repoIndex,
     );
     const includeSuppressed = options.includeSuppressed;
 
@@ -1096,12 +1125,14 @@ function createRuleContext(
   collector: ReviewCollector,
   registry: RuleRegistry,
   model: ReviewModel,
+  repoIndex: RepoIndex | null,
 ): RuleContext {
   const absoluteRepoPath = resolve(repoPath);
 
   return {
     repoPath: absoluteRepoPath,
     change,
+    repoIndex,
     summary,
     cache,
     model: enhanceReviewModel(model, absoluteRepoPath),
