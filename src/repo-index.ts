@@ -72,8 +72,11 @@ export async function openRepoIndex(dir: string): Promise<RepoIndex> {
 }
 
 /**
- * Load index from ADVERSARY_REPO_INDEX when set; otherwise return null
- * (callers treat as unavailable, not an error).
+ * Load index from ADVERSARY_REPO_INDEX when set; otherwise return null.
+ *
+ * A missing, deleted, or malformed index is treated as unavailable (null), not a
+ * hard run failure — rules already null-check `ctx.repoIndex`. Explicit opens via
+ * `openRepoIndex` still throw `RepoIndexUnavailableError`.
  */
 export async function repoIndexFromEnvironment(
   env: Record<string, string | undefined> = process.env,
@@ -84,10 +87,8 @@ export async function repoIndexFromEnvironment(
   }
   try {
     return await openRepoIndex(dir);
-  } catch (error) {
-    throw new RepoIndexUnavailableError(
-      error instanceof Error ? error.message : String(error),
-    );
+  } catch {
+    return null;
   }
 }
 
@@ -122,9 +123,7 @@ class MemoryRepoIndex implements RepoIndex {
 
   async importsOf(path: string): Promise<RepoIndexEdge[]> {
     const normalized = normalizePath(path);
-    return this.edges.filter(
-      (edge) => edge.from === normalized && edge.kind === "import",
-    );
+    return this.edges.filter((edge) => edge.from === normalized && edge.kind === "import");
   }
 
   async importersOf(path: string): Promise<RepoIndexEdge[]> {
@@ -154,7 +153,10 @@ function dirOf(path: string): string {
 async function readJsonl<T>(path: string): Promise<T[]> {
   const handle = await open(path, "r");
   try {
-    const rl = createInterface({ input: handle.createReadStream(), crlfDelay: Infinity });
+    const rl = createInterface({
+      input: handle.createReadStream(),
+      crlfDelay: Number.POSITIVE_INFINITY,
+    });
     const out: T[] = [];
     for await (const line of rl) {
       const trimmed = line.trim();

@@ -1,6 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   ADVERSARY_REPO_INDEX_ENV,
@@ -16,29 +16,29 @@ async function writeFixtureIndex(): Promise<string> {
   await mkdir(dir, { recursive: true });
   await writeFile(
     join(dir, "meta.json"),
-    JSON.stringify({
+    `${JSON.stringify({
       schemaVersion: "v1",
       fingerprint: "test",
       repoPath: "/fixture",
       fileCount: 4,
       edgeCount: 2,
-    }) + "\n",
+    })}\n`,
   );
   await writeFile(
     join(dir, "files.jsonl"),
-    [
+    `${[
       JSON.stringify({ path: "pkg/a/a.go", language: "go", size: 10, hash: "a" }),
       JSON.stringify({ path: "pkg/b/b.go", language: "go", size: 10, hash: "b" }),
       JSON.stringify({ path: "src/util.ts", language: "typescript", size: 10, hash: "u" }),
       JSON.stringify({ path: "src/main.ts", language: "typescript", size: 10, hash: "m" }),
-    ].join("\n") + "\n",
+    ].join("\n")}\n`,
   );
   await writeFile(
     join(dir, "edges.jsonl"),
-    [
+    `${[
       JSON.stringify({ from: "pkg/b/b.go", to: "pkg/a", kind: "import" }),
       JSON.stringify({ from: "src/main.ts", to: "src/util.ts", kind: "import" }),
-    ].join("\n") + "\n",
+    ].join("\n")}\n`,
   );
   return dir;
 }
@@ -70,12 +70,19 @@ describe("repo index", () => {
       [ADVERSARY_REPO_INDEX_ENV]: dir,
     });
     expect(index).not.toBeNull();
-    const file = await index!.file("src/util.ts");
+    const file = await index?.file("src/util.ts");
     expect(file?.language).toBe("typescript");
   });
 
   it("returns null when the env var is unset", async () => {
     const index = await repoIndexFromEnvironment({});
+    expect(index).toBeNull();
+  });
+
+  it("returns null when ADVERSARY_REPO_INDEX points at a missing directory", async () => {
+    const index = await repoIndexFromEnvironment({
+      [ADVERSARY_REPO_INDEX_ENV]: join(tmpdir(), "adversary-repo-index-missing-dir"),
+    });
     expect(index).toBeNull();
   });
 });

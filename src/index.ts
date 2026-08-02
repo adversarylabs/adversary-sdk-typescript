@@ -11,11 +11,8 @@ import {
   createModelFromEnvironment,
   unavailableModel,
 } from "./model.js";
+import { type RepoIndex, repoIndexFromEnvironment } from "./repo-index.js";
 import { reviewWithRepositoryTools } from "./repository-model.js";
-import {
-  type RepoIndex,
-  repoIndexFromEnvironment,
-} from "./repo-index.js";
 
 export {
   ADVERSARY_MODEL_ENDPOINT_ENV,
@@ -655,9 +652,7 @@ export class Adversary {
     const registry = this.ruleDefinitions.snapshot();
     const change = normalizeChangeContext(options.input.change);
     const repoIndex =
-      options.repoIndex !== undefined
-        ? options.repoIndex
-        : await repoIndexFromEnvironment();
+      options.repoIndex !== undefined ? options.repoIndex : await repoIndexFromEnvironment();
     const context = createRuleContext(
       repoPath,
       change,
