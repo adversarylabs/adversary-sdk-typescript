@@ -681,6 +681,35 @@ CLI **expands** composition at run time. See the CLI doc
 [`docs/composition.md`](https://github.com/adversarylabs/adversary/blob/main/docs/composition.md)
 when that lands on main.
 
+### Comment voice (`agent/voice.md`)
+
+GitHub PR comment wording is **not** owned by the TypeScript rule runtime. The
+CLI loads package voice markdown when you pass `--github-review` and rewrites
+finding bodies with a model (or keeps a template body without credentials).
+
+Typical package files:
+
+```text
+agent/voice.md                 # core persona + example few-shot bank
+agent/scope.md                 # mission / train scope (separate from voice)
+```
+
+`agent/voice.md` should include:
+
+1. **Core voice** — cadence, structure, bans, length  
+2. **`## Example maintainer comments (style only)`** — real human quotes under
+   Ship / Design / Defects / Nits subsections (style few-shots only; never
+   hard-code those strings as finding titles in `src/`)  
+3. **Output** — return only the PR comment body  
+
+Rewrite rules (CLI preamble): match spirit, re-ground in current evidence, never
+copy a banked quote unchanged. Technical depth still comes from finding
+title/summary/evidence produced by rules (or composed specialists).
+
+With composition, put persona voice on the **entry** package you run; members
+detect, the entry package sounds. Full CLI guide:
+[`docs/voice.md`](https://github.com/adversarylabs/adversary/blob/main/docs/voice.md).
+
 ### Automatic detection
 
 The SDK owns the canonical `adversary.yaml` model, parser, validation, and published JSON schema.
