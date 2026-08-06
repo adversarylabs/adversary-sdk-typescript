@@ -78,6 +78,7 @@ export {
   parseAdversaryManifest,
   validateAdversaryManifest,
   type AdversaryManifest,
+  type UseManifest,
   type DetectionManifest,
   type EnvironmentPermissionsManifest,
   type FilesystemPermissionsManifest,

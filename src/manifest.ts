@@ -47,10 +47,30 @@ export interface FindingsManifest {
   format?: "adversary.review.v1";
 }
 
+/**
+ * One composition member declared under adversary.yaml `uses`.
+ * Exactly one of `name` or `path` is required (enforced by schema).
+ * The CLI expands `uses` transitively at run time; this package only models
+ * and validates the field.
+ */
+export interface UseManifest {
+  /** Registry / short adversary name (e.g. go/concurrency). */
+  name?: string;
+  /** Exact tag for `name` (ranges are not resolved yet). */
+  version?: string;
+  /** Local package directory relative to this package (or absolute). */
+  path?: string;
+}
+
 export interface AdversaryManifest {
   name: string;
   version?: string;
   description?: string;
+  /**
+   * Other adversaries to run when this package is selected (composition).
+   * Expanded by the CLI; GitHub comment voice stays on the CLI entry package.
+   */
+  uses?: UseManifest[];
   triggers?: TriggerManifest;
   detection?: DetectionManifest;
   runtime: RuntimeManifest;

@@ -627,11 +627,65 @@ findings:
   format: adversary.review.v1
 ```
 
+### Composition (`uses`)
+
+Persona packs and language packs can **compose** other adversaries. Declare
+`uses` so a single CLI entrypoint expands to specialists:
+
+```yaml
+name: lang/go
+version: 0.0.7
+description: Go language pack — specialists under one entrypoint.
+
+uses:
+  - name: go/concurrency
+  - name: go/security
+    version: "0.0.13"   # optional exact tag only (no ^/~ ranges yet)
+  - path: ../local-specialist   # package-relative; mutually exclusive with name
+
+runtime:
+  name: node
+  version: "22"
+  command: [dist/index.js]
+
+findings:
+  format: adversary.review.v1
+```
+
+```yaml
+# Persona: voice + depth
+name: local/torvalds-adversary
+uses:
+  - name: lang/go                 # may expand further (transitive)
+  - name: review/engineering
+  - name: review/complexity
+  - name: security/secrets
+# … runtime, agent/voice.md for GitHub rewrite voice …
+```
+
+| Concern | Owner |
+|---------|--------|
+| Detection depth | Each package in `uses` (and the root if it has rules) |
+| GitHub comment **voice** | The **CLI entry** package (`agent/voice.md` + section banks), not members |
+| Expansion | CLI (`adversary run <entry>`); transitive, deduped, depth-capped |
+| Skip expansion | `adversary run <entry> --no-compose` |
+
+Rules for each `uses` item:
+
+- Exactly one of `name` or `path`
+- `version` only with `name`, and only an **exact** tag
+- Relative `path` is resolved from the declaring package root
+
+The SDK **models and validates** `uses` (schema + `AdversaryManifest.uses`). The
+CLI **expands** composition at run time. See the CLI doc
+[`docs/composition.md`](https://github.com/adversarylabs/adversary/blob/main/docs/composition.md)
+when that lands on main.
+
 ### Automatic detection
 
 The SDK owns the canonical `adversary.yaml` model, parser, validation, and published JSON schema.
 The CLI uses the parsed optional `detection` section when deciding which installed adversaries are
-relevant to `adversary auto`.
+relevant to `adversary auto`. Composition (`uses`) is not expanded during automatic selection yet.
 
 Use declarative file detection when changed repository-relative paths are sufficient:
 

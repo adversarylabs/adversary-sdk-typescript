@@ -38,6 +38,39 @@ function withDetection(detection: string): string {
   return valid.replace("runtime:\n", `detection:\n${detection}\nruntime:\n`);
 }
 
+function withUses(uses: string): string {
+  return valid.replace("triggers:\n", `uses:\n${uses}\ntriggers:\n`);
+}
+
+describe("adversary manifest composition (uses)", () => {
+  it("parses name and path members", () => {
+    const manifest = parseAdversaryManifest(
+      withUses(`  - name: go/concurrency
+  - name: go/security
+    version: "0.0.13"
+  - path: ../local-leaf
+`),
+    );
+    expect(manifest.uses).toEqual([
+      { name: "go/concurrency" },
+      { name: "go/security", version: "0.0.13" },
+      { path: "../local-leaf" },
+    ]);
+  });
+
+  it("rejects name and path together", () => {
+    expect(() =>
+      parseAdversaryManifest(withUses("  - name: go/x\n    path: ../y\n")),
+    ).toThrow(ManifestValidationError);
+  });
+
+  it("rejects version without name (path member)", () => {
+    expect(() =>
+      parseAdversaryManifest(withUses('  - path: ../x\n    version: "1.0.0"\n')),
+    ).toThrow(ManifestValidationError);
+  });
+});
+
 describe("adversary manifest detection", () => {
   it("preserves backward compatibility when detection is absent", () => {
     const manifest = parseAdversaryManifest(valid);
