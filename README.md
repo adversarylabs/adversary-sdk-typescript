@@ -710,6 +710,29 @@ With composition, put persona voice on the **entry** package you run; members
 detect, the entry package sounds. Full CLI guide:
 [`docs/voice.md`](https://github.com/adversarylabs/adversary/blob/main/docs/voice.md).
 
+### Train (home-built packages)
+
+Improve **your** local packages from your team’s PR review history with the CLI
+(not an SDK API):
+
+```sh
+cd my-adversary
+adversary train init --single-package
+# edit adversary.train.yaml — sources (org/repos or authors_only), official jury
+adversary train run
+adversary train results ls
+adversary train results apply <id>
+```
+
+- Only **local** packages receive drafts; optional **official** packages are a
+  read-only jury (so you do not re-implement the catalog).
+- Apply writes `docs/train-drafts/` and can open an agent-ready GitHub issue.
+- Human gold: implement detection for the *class*, and bank short excerpts in
+  `agent/voice.md` (style only)—never hard-code quotes in `src/`.
+- Keep `agent/scope.md` / `docs/scope.md` accurate so train knows what is a fair miss.
+
+Guide: [`docs/train.md`](https://github.com/adversarylabs/adversary/blob/main/docs/train.md).
+
 ### Automatic detection
 
 The SDK owns the canonical `adversary.yaml` model, parser, validation, and published JSON schema.
