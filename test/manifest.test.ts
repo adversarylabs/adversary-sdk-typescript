@@ -59,9 +59,9 @@ describe("adversary manifest composition (uses)", () => {
   });
 
   it("rejects name and path together", () => {
-    expect(() =>
-      parseAdversaryManifest(withUses("  - name: go/x\n    path: ../y\n")),
-    ).toThrow(ManifestValidationError);
+    expect(() => parseAdversaryManifest(withUses("  - name: go/x\n    path: ../y\n"))).toThrow(
+      ManifestValidationError,
+    );
   });
 
   it("rejects version without name (path member)", () => {
