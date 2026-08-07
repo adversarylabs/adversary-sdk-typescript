@@ -627,11 +627,117 @@ findings:
   format: adversary.review.v1
 ```
 
+### Composition (`uses`)
+
+Persona packs and language packs can **compose** other adversaries. Declare
+`uses` so a single CLI entrypoint expands to specialists:
+
+```yaml
+name: lang/go
+version: 0.0.7
+description: Go language pack — specialists under one entrypoint.
+
+uses:
+  - name: go/concurrency
+  - name: go/security
+    version: "0.0.13"   # optional exact tag only (no ^/~ ranges yet)
+  - path: ../local-specialist   # package-relative; mutually exclusive with name
+
+runtime:
+  name: node
+  version: "22"
+  command: [dist/index.js]
+
+findings:
+  format: adversary.review.v1
+```
+
+```yaml
+# Persona: voice + depth
+name: local/torvalds-adversary
+uses:
+  - name: lang/go                 # may expand further (transitive)
+  - name: review/engineering
+  - name: review/complexity
+  - name: security/secrets
+# … runtime, agent/voice.md for GitHub rewrite voice …
+```
+
+| Concern | Owner |
+|---------|--------|
+| Detection depth | Each package in `uses` (and the root if it has rules) |
+| GitHub comment **voice** | The **CLI entry** package (`agent/voice.md` + section banks), not members |
+| Expansion | CLI (`adversary run <entry>`); transitive, deduped, depth-capped |
+| Skip expansion | `adversary run <entry> --no-compose` |
+
+Rules for each `uses` item:
+
+- Exactly one of `name` or `path`
+- `version` only with `name`, and only an **exact** tag
+- Relative `path` is resolved from the declaring package root
+
+The SDK **models and validates** `uses` (schema + `AdversaryManifest.uses`). The
+CLI **expands** composition at run time. See the CLI doc
+[`docs/composition.md`](https://github.com/adversarylabs/adversary/blob/main/docs/composition.md)
+when that lands on main.
+
+### Comment voice (`agent/voice.md`)
+
+GitHub PR comment wording is **not** owned by the TypeScript rule runtime. The
+CLI loads package voice markdown when you pass `--github-review` and rewrites
+finding bodies with a model (or keeps a template body without credentials).
+
+Typical package files:
+
+```text
+agent/voice.md                 # core persona + example few-shot bank
+agent/scope.md                 # mission / train scope (separate from voice)
+```
+
+`agent/voice.md` should include:
+
+1. **Core voice** — cadence, structure, bans, length  
+2. **`## Example maintainer comments (style only)`** — real human quotes under
+   Ship / Design / Defects / Nits subsections (style few-shots only; never
+   hard-code those strings as finding titles in `src/`)  
+3. **Output** — return only the PR comment body  
+
+Rewrite rules (CLI preamble): match spirit, re-ground in current evidence, never
+copy a banked quote unchanged. Technical depth still comes from finding
+title/summary/evidence produced by rules (or composed specialists).
+
+With composition, put persona voice on the **entry** package you run; members
+detect, the entry package sounds. Full CLI guide:
+[`docs/voice.md`](https://github.com/adversarylabs/adversary/blob/main/docs/voice.md).
+
+### Train (home-built packages)
+
+Improve **your** local packages from your team’s PR review history with the CLI
+(not an SDK API):
+
+```sh
+cd my-adversary
+adversary train init --single-package
+# edit adversary.train.yaml — sources (org/repos or authors_only), official jury
+adversary train run
+adversary train results ls
+adversary train results apply <id>
+```
+
+- Only **local** packages receive drafts; optional **official** packages are a
+  read-only jury (so you do not re-implement the catalog).
+- Apply writes `docs/train-drafts/` and can open an agent-ready GitHub issue.
+- Human gold: implement detection for the *class*, and bank short excerpts in
+  `agent/voice.md` (style only)—never hard-code quotes in `src/`.
+- Keep `agent/scope.md` / `docs/scope.md` accurate so train knows what is a fair miss.
+
+Guide: [`docs/train.md`](https://github.com/adversarylabs/adversary/blob/main/docs/train.md).
+
 ### Automatic detection
 
 The SDK owns the canonical `adversary.yaml` model, parser, validation, and published JSON schema.
 The CLI uses the parsed optional `detection` section when deciding which installed adversaries are
-relevant to `adversary auto`.
+relevant to `adversary auto`. Composition (`uses`) is not expanded during automatic selection yet.
 
 Use declarative file detection when changed repository-relative paths are sufficient:
 
