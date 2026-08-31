@@ -1,7 +1,9 @@
+import { execFile } from "node:child_process";
 import { createReadStream } from "node:fs";
 import { lstat, readdir, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
+import { promisify } from "node:util";
 import {
   ModelReviewError,
   type ModelReviewRequest,
@@ -28,6 +30,7 @@ const MAX_OPERATION_PATH_LENGTH = 4_096;
 const MAX_OPERATIONS_PER_ROUND = 8;
 const PLANNING_OUTPUT_TOKENS = 1_500;
 const DEFAULT_PLANNING_TIMEOUT_MS = 120_000;
+const execFileAsync = promisify(execFile);
 
 const defaultExcludedSegments = new Set([
   ".git",
@@ -73,6 +76,13 @@ export interface ModelRepositoryRetrieval {
   exhausted: boolean;
 }
 
+export interface ModelRepositoryChange {
+  baseRef?: string;
+  headRef?: string;
+  changedFiles: readonly string[];
+  worktree: boolean;
+}
+
 export function resolveModelCitation(
   citations: readonly ModelRepositoryCitation[] | undefined,
   citationId: string,
@@ -97,7 +107,7 @@ interface RepositoryToolBudget {
 }
 
 interface RepositoryOperation {
-  tool: "list_directory" | "read_file";
+  tool: "list_directory" | "read_file" | "read_change";
   path: string;
   cursor: number;
   startLine: number;
@@ -127,13 +137,35 @@ interface ReadToolResult extends ModelRepositoryCitation {
   truncated: boolean;
 }
 
+interface ChangeSummaryToolResult {
+  tool: "change_summary";
+  baseRef?: string;
+  headRef?: string;
+  changedFiles: readonly string[];
+  worktree: boolean;
+}
+
+interface ChangeToolResult {
+  tool: "read_change";
+  path: string;
+  baseRef: string;
+  headRef: string;
+  content: string;
+  truncated: boolean;
+}
+
 interface ErrorToolResult {
-  tool: "list_directory" | "read_file";
+  tool: "list_directory" | "read_file" | "read_change";
   path: string;
   error: string;
 }
 
-type RepositoryToolResult = DirectoryToolResult | ReadToolResult | ErrorToolResult;
+type RepositoryToolResult =
+  | DirectoryToolResult
+  | ReadToolResult
+  | ChangeSummaryToolResult
+  | ChangeToolResult
+  | ErrorToolResult;
 
 const repositoryPlanSchema: Record<string, unknown> = {
   type: "object",
@@ -154,7 +186,7 @@ const repositoryPlanSchema: Record<string, unknown> = {
         additionalProperties: false,
         required: ["tool", "path", "cursor", "startLine", "endLine"],
         properties: {
-          tool: { type: "string", enum: ["list_directory", "read_file"] },
+          tool: { type: "string", enum: ["list_directory", "read_file", "read_change"] },
           path: { type: "string" },
           cursor: {
             type: "integer",
@@ -178,6 +210,7 @@ export async function reviewWithRepositoryTools<T>(
   model: ReviewModel,
   repositoryRoot: string | undefined,
   request: ModelReviewRequest,
+  change?: ModelRepositoryChange | null,
 ): Promise<ModelReviewResult<T>> {
   if (repositoryRoot === undefined || repositoryRoot.trim() === "") {
     throw new ModelReviewError("Repository model tools require a rule-context repository root.", {
@@ -201,6 +234,18 @@ export async function reviewWithRepositoryTools<T>(
   let exhausted = false;
   let ready = false;
   let usage: ModelReviewUsage = {};
+
+  if (change !== undefined && change !== null) {
+    const summary: ChangeSummaryToolResult = {
+      tool: "change_summary",
+      ...(change.baseRef === undefined ? {} : { baseRef: change.baseRef }),
+      ...(change.headRef === undefined ? {} : { headRef: change.headRef }),
+      changedFiles: change.changedFiles.slice(0, 500),
+      worktree: change.worktree,
+    };
+    toolResults.push(summary);
+    totalBytes += encodedBytes(summary);
+  }
 
   const initial = fitDirectoryResult(
     await executeListDirectory(root, ".", 0, budget.directoryPageSize, include, exclude),
@@ -264,7 +309,7 @@ export async function reviewWithRepositoryTools<T>(
             exclude,
           );
           directoriesListed += 1;
-        } else {
+        } else if (operation.tool === "read_file") {
           result = await executeReadFile(
             root,
             operation,
@@ -280,6 +325,8 @@ export async function reviewWithRepositoryTools<T>(
             endLine: result.endLine,
             content: result.content,
           };
+        } else {
+          result = await executeReadChange(root, operation, budget, include, exclude, change);
         }
       } catch (error) {
         result = {
@@ -358,6 +405,7 @@ ${prompt}
 RETRIEVAL RULES:
 - list_directory reveals one deterministic, paginated directory page. Use cursor=0 initially and nextCursor from a prior result for another page. Set startLine=0 and endLine=0.
 - read_file retrieves an inclusive 1-based line range and creates an immutable citation. Set cursor=0.
+- read_change retrieves the patch for one path in change_summary. Set cursor=0, startLine=0, and endLine=0. Use it before judging changed behavior. It is navigation evidence, not a source citation; cite exact lines from a subsequent read_file.
 - Inspect implementation and relevant tests before setting ready=true.
 - Traverse only directories relevant to the requested review; do not inventory the entire repository.
 - Prefer focused line ranges around important behavior over whole files.
@@ -598,6 +646,66 @@ async function executeReadFile(
   };
 }
 
+async function executeReadChange(
+  root: string,
+  operation: RepositoryOperation,
+  budget: RepositoryToolBudget,
+  include: readonly RegExp[],
+  exclude: readonly RegExp[],
+  change: ModelRepositoryChange | null | undefined,
+): Promise<ChangeToolResult> {
+  if (change === undefined || change === null || change.baseRef === undefined) {
+    throw new Error("read_change requires a runner-provided change context");
+  }
+  const { relativePath } = await secureRepositoryPath(root, operation.path, "file");
+  if (!change.changedFiles.includes(relativePath)) {
+    throw new Error("read_change path is not in the runner-provided change set");
+  }
+  if (!isIncluded(relativePath, include) || isExcluded(relativePath, exclude)) {
+    throw new Error("read_change path is outside the configured repository file set");
+  }
+  const baseRef = validRevision(change.baseRef);
+  const headRef = change.worktree ? "WORKTREE" : validRevision(change.headRef ?? "");
+  const revisions = change.worktree ? [baseRef] : [baseRef, headRef];
+  const { stdout } = await execFileAsync(
+    "git",
+    [
+      "-C",
+      root,
+      "--no-pager",
+      "diff",
+      "--no-ext-diff",
+      "--unified=40",
+      "--find-renames",
+      ...revisions,
+      "--",
+      relativePath,
+    ],
+    { encoding: "utf8", maxBuffer: Math.max(budget.maxBytesPerRead * 4, 1 << 20) },
+  );
+  const encoded = Buffer.from(stdout, "utf8");
+  const truncated = encoded.byteLength > budget.maxBytesPerRead;
+  const content = truncated
+    ? new TextDecoder().decode(encoded.subarray(0, budget.maxBytesPerRead))
+    : stdout;
+  return { tool: "read_change", path: relativePath, baseRef, headRef, content, truncated };
+}
+
+function validRevision(value: string): string {
+  const revision = value.trim();
+  if (
+    revision === "" ||
+    revision.length > 512 ||
+    revision.startsWith("-") ||
+    revision.includes("\0") ||
+    revision.includes("\n") ||
+    revision.includes("\r")
+  ) {
+    throw new Error("change revision is invalid");
+  }
+  return revision;
+}
+
 async function secureRepositoryPath(
   root: string,
   requestedPath: string,
@@ -669,7 +777,9 @@ function requireRepositoryPlan(value: unknown): RepositoryPlan {
 function operationKey(operation: RepositoryOperation): string {
   return operation.tool === "list_directory"
     ? `${operation.tool}:${operation.path}:${operation.cursor}`
-    : `${operation.tool}:${operation.path}:${operation.startLine}:${operation.endLine}`;
+    : operation.tool === "read_change"
+      ? `${operation.tool}:${operation.path}`
+      : `${operation.tool}:${operation.path}:${operation.startLine}:${operation.endLine}`;
 }
 
 function encodedBytes(value: unknown): number {

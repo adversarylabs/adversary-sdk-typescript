@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -313,6 +314,142 @@ describe("model review capability", () => {
         exhausted: false,
       });
       expect(reviewResult?.usage).toEqual({ inputTokens: 5, outputTokens: 5 });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("shows the exact change before asking the model to judge it", async () => {
+    const root = await mkdtemp(join(tmpdir(), "adversary-sdk-change-tools-"));
+    try {
+      execFileSync("git", ["-C", root, "init", "-q"]);
+      await writeFile(join(root, "service.ts"), "export function value() {\n  return 'safe';\n}\n");
+      execFileSync("git", ["-C", root, "add", "service.ts"]);
+      execFileSync("git", [
+        "-C",
+        root,
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.com",
+        "commit",
+        "-qm",
+        "base",
+      ]);
+      const baseRef = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], {
+        encoding: "utf8",
+      }).trim();
+      await writeFile(
+        join(root, "service.ts"),
+        "export function value() {\n  return 'broken';\n}\n",
+      );
+      execFileSync("git", ["-C", root, "add", "service.ts"]);
+      execFileSync("git", [
+        "-C",
+        root,
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.com",
+        "commit",
+        "-qm",
+        "head",
+      ]);
+      const headRef = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], {
+        encoding: "utf8",
+      }).trim();
+
+      let planningCalls = 0;
+      let finalInput: unknown;
+      const model: ReviewModel = {
+        async review<T>(request: ModelReviewRequest) {
+          const properties = request.schema.properties as Record<string, unknown> | undefined;
+          if (properties?.ready !== undefined) {
+            planningCalls += 1;
+            const encoded = JSON.stringify(request.input);
+            if (planningCalls === 1) {
+              expect(encoded).toContain('"tool":"change_summary"');
+              expect(encoded).toContain("service.ts");
+              return {
+                output: {
+                  ready: false,
+                  operations: [
+                    {
+                      tool: "read_change",
+                      path: "service.ts",
+                      cursor: 0,
+                      startLine: 0,
+                      endLine: 0,
+                    },
+                  ],
+                } as T,
+                provider: "fixture",
+                model: "planner",
+              };
+            }
+            if (planningCalls === 2) {
+              expect(encoded).toContain("+  return 'broken';");
+              return {
+                output: {
+                  ready: false,
+                  operations: [
+                    {
+                      tool: "read_file",
+                      path: "service.ts",
+                      cursor: 0,
+                      startLine: 1,
+                      endLine: 3,
+                    },
+                  ],
+                } as T,
+                provider: "fixture",
+                model: "planner",
+              };
+            }
+            return {
+              output: { ready: true, operations: [] } as T,
+              provider: "fixture",
+              model: "planner",
+            };
+          }
+          finalInput = request.input;
+          return {
+            output: { verdict: "approve" } as T,
+            provider: "fixture",
+            model: "reviewer",
+          };
+        },
+      };
+      const app = new Adversary({ name: "adversarylabs/change-tools" });
+      app.rule("review", async (ctx) => {
+        await ctx.model.review({
+          prompt: "Review the changed behavior.",
+          input: {},
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            required: ["verdict"],
+            properties: { verdict: { const: "approve" } },
+          },
+          tools: { repository: { include: ["**/*.ts"] } },
+        });
+      });
+      await app.run({
+        input: {
+          source: { path: root },
+          change: {
+            type: "diff",
+            base_ref: baseRef,
+            head_ref: headRef,
+            changed_files: ["service.ts"],
+          },
+        },
+        model,
+      });
+
+      expect(planningCalls).toBe(3);
+      expect(JSON.stringify(finalInput)).toContain("+  return 'broken';");
+      expect(JSON.stringify(finalInput)).toContain("repo:read:1");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

@@ -43,6 +43,7 @@ export {
 } from "./model.js";
 export type {
   ModelRepositoryCitation,
+  ModelRepositoryChange,
   ModelRepositoryRetrieval,
   ModelRepositoryToolOptions,
 } from "./repository-model.js";
@@ -1192,7 +1193,7 @@ function createRuleContext(
     repoGraph,
     summary,
     cache,
-    model: enhanceReviewModel(model, absoluteRepoPath),
+    model: enhanceReviewModel(model, absoluteRepoPath, change),
     relpath(path: string): string {
       return relative(absoluteRepoPath, isAbsolute(path) ? path : resolve(absoluteRepoPath, path));
     },
@@ -1993,12 +1994,13 @@ export async function formatOpinionAsync(
 export function enhanceReviewModel(
   model: ReviewModel,
   repositoryRoot?: string,
+  change?: ChangeContext | null,
 ): ContextualReviewModel {
   return {
     review: (request) =>
       request.tools?.repository === undefined
         ? model.review(request)
-        : reviewWithRepositoryTools(model, repositoryRoot, request),
+        : reviewWithRepositoryTools(model, repositoryRoot, request, change),
     concern: (request) => rewriteOpinionConcern(model, request),
   };
 }
