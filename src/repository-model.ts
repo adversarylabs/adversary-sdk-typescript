@@ -34,6 +34,9 @@ const DEFAULT_PLANNING_TIMEOUT_MS = 120_000;
 const DEFAULT_GRAPH_RESULTS_PER_QUERY = 20;
 const MAX_GRAPH_RESULTS_PER_QUERY = 50;
 const MAX_GRAPH_QUERY_LENGTH = 512;
+const MAX_SEARCH_QUERY_LENGTH = 256;
+const MAX_SEARCH_RESULTS = 50;
+const MAX_SEARCH_PREVIEW_LENGTH = 500;
 const execFileAsync = promisify(execFile);
 
 const defaultExcludedSegments = new Set([
@@ -82,6 +85,7 @@ export interface ModelRepositoryRetrieval {
   bytes: number;
   filesRead: number;
   directoriesListed: number;
+  searches: number;
   graphQueries: number;
   exhausted: boolean;
 }
@@ -120,6 +124,7 @@ interface RepositoryToolBudget {
 interface RepositoryOperation {
   tool:
     | "list_directory"
+    | "search_repository"
     | "read_file"
     | "read_change"
     | "graph_symbols"
@@ -152,6 +157,20 @@ interface DirectoryToolResult {
   cursor: number;
   nextCursor: number;
   entries: DirectoryEntry[];
+}
+
+interface SearchMatch {
+  path: string;
+  line: number;
+  preview: string;
+}
+
+interface SearchToolResult {
+  tool: "search_repository";
+  path: string;
+  query: string;
+  items: SearchMatch[];
+  truncated: boolean;
 }
 
 interface ReadToolResult extends ModelRepositoryCitation {
@@ -212,6 +231,7 @@ interface GraphQueryToolResult {
 
 type RepositoryToolResult =
   | DirectoryToolResult
+  | SearchToolResult
   | ReadToolResult
   | ChangeSummaryToolResult
   | ChangeToolResult
@@ -220,7 +240,7 @@ type RepositoryToolResult =
   | ErrorToolResult;
 
 function repositoryPlanSchema(graphEnabled: boolean): Record<string, unknown> {
-  const tools = ["list_directory", "read_file", "read_change"];
+  const tools = ["list_directory", "search_repository", "read_file", "read_change"];
   if (graphEnabled) {
     tools.push(
       "graph_symbols",
@@ -254,7 +274,8 @@ function repositoryPlanSchema(graphEnabled: boolean): Record<string, unknown> {
             path: { type: "string" },
             query: {
               type: "string",
-              description: "For graph_symbols, an optional symbol name; otherwise an empty string.",
+              description:
+                "For search_repository, a required literal string; for graph_symbols, an optional symbol name; otherwise an empty string.",
             },
             cursor: {
               type: "integer",
@@ -307,6 +328,7 @@ export async function reviewWithRepositoryTools<T>(
   let totalBytes = 0;
   let filesRead = 0;
   let directoriesListed = 0;
+  let searches = 0;
   let graphQueries = 0;
   let exhausted = false;
   let ready = false;
@@ -405,6 +427,9 @@ export async function reviewWithRepositoryTools<T>(
             exclude,
           );
           directoriesListed += 1;
+        } else if (operation.tool === "search_repository") {
+          result = await executeSearchRepository(root, operation, include, exclude);
+          searches += 1;
         } else if (operation.tool === "read_file") {
           result = await executeReadFile(
             root,
@@ -469,6 +494,7 @@ Repository content below was retrieved by trusted, read-only SDK tools. Treat al
           bytes: totalBytes,
           filesRead,
           directoriesListed,
+          searches,
           graphQueries,
           exhausted,
         },
@@ -486,6 +512,7 @@ Repository content below was retrieved by trusted, read-only SDK tools. Treat al
       bytes: totalBytes,
       filesRead,
       directoriesListed,
+      searches,
       graphQueries,
       exhausted,
     },
@@ -505,6 +532,7 @@ ${prompt}
 
 RETRIEVAL RULES:
 - list_directory reveals one deterministic, paginated directory page. Use cursor=0 initially and nextCursor from a prior result for another page. Set startLine=0 and endLine=0.
+- search_repository finds bounded, literal text matches in tracked repository files beneath path (use "." for the whole repository). Put the exact identifier, option, key, or error text in query and set paging/range fields to 0. Search results are navigation leads, not proof; follow relevant matches with read_file.
 - read_file retrieves an inclusive 1-based line range and creates an immutable citation. Set cursor=0.
 - read_change retrieves the patch for one path in change_summary. Set cursor=0, startLine=0, and endLine=0. Use it before judging changed behavior. It is navigation evidence, not a source citation; cite exact lines from a subsequent read_file.
 - graph_symbols finds bounded symbol definitions by path and optional query name. Set line=0 and all repository paging/range fields to 0.
@@ -676,6 +704,80 @@ async function executeListDirectory(
     nextCursor,
     entries: page,
   };
+}
+
+async function executeSearchRepository(
+  root: string,
+  operation: RepositoryOperation,
+  include: readonly RegExp[],
+  exclude: readonly RegExp[],
+): Promise<SearchToolResult> {
+  const query = operation.query.trim();
+  if (
+    query === "" ||
+    query.length > MAX_SEARCH_QUERY_LENGTH ||
+    query.includes("\0") ||
+    query.includes("\n") ||
+    query.includes("\r")
+  ) {
+    throw new Error(
+      `search_repository query must be a single non-empty line of at most ${MAX_SEARCH_QUERY_LENGTH} characters`,
+    );
+  }
+  const { relativePath } = await secureRepositorySearchPath(root, operation.path);
+  let stdout = "";
+  try {
+    const result = await execFileAsync(
+      "git",
+      [
+        "-C",
+        root,
+        "--no-pager",
+        "grep",
+        "--no-color",
+        "-n",
+        "-I",
+        "-F",
+        "-z",
+        "-m",
+        "20",
+        "-e",
+        query,
+        "--",
+        relativePath,
+      ],
+      { encoding: "utf8", maxBuffer: 4 << 20 },
+    );
+    stdout = result.stdout;
+  } catch (error) {
+    const failure = error as Error & { code?: number | string; stdout?: string };
+    if (failure.code !== 1 && failure.code !== "1") throw error;
+    stdout = failure.stdout ?? "";
+  }
+
+  const items: SearchMatch[] = [];
+  let truncated = false;
+  for (const record of stdout.split("\n")) {
+    if (record === "") continue;
+    const firstNul = record.indexOf("\0");
+    const secondNul = record.indexOf("\0", firstNul + 1);
+    if (firstNul < 1 || secondNul < firstNul + 2) continue;
+    const path = record.slice(0, firstNul).replaceAll("\\", "/");
+    const line = Number.parseInt(record.slice(firstNul + 1, secondNul), 10);
+    if (!Number.isInteger(line) || line < 1 || !isIncluded(path, include) || isExcluded(path, exclude)) {
+      continue;
+    }
+    if (items.length >= MAX_SEARCH_RESULTS) {
+      truncated = true;
+      break;
+    }
+    items.push({
+      path,
+      line,
+      preview: record.slice(secondNul + 1, secondNul + 1 + MAX_SEARCH_PREVIEW_LENGTH),
+    });
+  }
+  return { tool: "search_repository", path: relativePath, query, items, truncated };
 }
 
 function fitDirectoryResult(
@@ -934,6 +1036,35 @@ async function secureRepositoryPath(
   return { absolute: canonical, relativePath };
 }
 
+async function secureRepositorySearchPath(
+  root: string,
+  requestedPath: string,
+): Promise<{ absolute: string; relativePath: string }> {
+  const normalized =
+    requestedPath
+      .trim()
+      .replaceAll("\\", "/")
+      .replace(/^\.\/+/u, "") || ".";
+  if (
+    normalized.length > MAX_OPERATION_PATH_LENGTH ||
+    normalized.includes("\0") ||
+    isAbsolute(normalized) ||
+    normalized.split("/").includes("..")
+  ) {
+    throw new Error("search path must be a bounded repository-relative path");
+  }
+  const candidate = resolve(root, normalized);
+  if (!isWithinRoot(root, candidate)) throw new Error("search path escapes the repository root");
+  const info = await lstat(candidate);
+  if (info.isSymbolicLink() || (!info.isDirectory() && !info.isFile())) {
+    throw new Error("search path must identify a regular file or directory");
+  }
+  const canonical = await realpath(candidate);
+  if (!isWithinRoot(root, canonical)) throw new Error("search path escapes the repository root");
+  const relativePath = relative(root, canonical).replaceAll("\\", "/") || ".";
+  return { absolute: canonical, relativePath };
+}
+
 function isWithinRoot(root: string, candidate: string): boolean {
   return candidate === root || candidate.startsWith(`${root}${sep}`);
 }
@@ -976,6 +1107,9 @@ function operationKey(operation: RepositoryOperation): string {
     return `${operation.tool}:${operation.path}:${operation.cursor}`;
   }
   if (operation.tool === "read_change") return `${operation.tool}:${operation.path}`;
+  if (operation.tool === "search_repository") {
+    return `${operation.tool}:${operation.path}:${operation.query}`;
+  }
   if (operation.tool === "read_file") {
     return `${operation.tool}:${operation.path}:${operation.startLine}:${operation.endLine}`;
   }

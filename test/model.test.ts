@@ -367,6 +367,104 @@ describe("model review capability", () => {
     }
   });
 
+  it("searches tracked repository text before reading matched evidence", async () => {
+    const root = await mkdtemp(join(tmpdir(), "adversary-sdk-repository-search-"));
+    try {
+      await mkdir(join(root, "src"));
+      await writeFile(
+        join(root, "src", "consumer.swift"),
+        "func callService() {\n  legacyIdentifier()\n}\n",
+      );
+      execFileSync("git", ["-C", root, "init", "-q"]);
+      execFileSync("git", ["-C", root, "add", "src/consumer.swift"]);
+      let planningCalls = 0;
+      let finalInput: unknown;
+      const model: ReviewModel = {
+        async review<T>(request: ModelReviewRequest) {
+          const properties = request.schema.properties as Record<string, unknown> | undefined;
+          if (properties?.ready !== undefined) {
+            planningCalls += 1;
+            const encoded = JSON.stringify(request.input);
+            if (planningCalls === 1) {
+              expect(request.prompt).toContain("search_repository");
+              return {
+                output: {
+                  ready: false,
+                  operations: [{
+                    tool: "search_repository",
+                    path: ".",
+                    query: "legacyIdentifier",
+                    cursor: 0,
+                    line: 0,
+                    startLine: 0,
+                    endLine: 0,
+                  }],
+                } as T,
+                provider: "fixture",
+                model: "planner",
+              };
+            }
+            if (planningCalls === 2) {
+              expect(encoded).toContain('"tool":"search_repository"');
+              expect(encoded).toContain("src/consumer.swift");
+              expect(encoded).toContain("legacyIdentifier()");
+              return {
+                output: {
+                  ready: false,
+                  operations: [{
+                    tool: "read_file",
+                    path: "src/consumer.swift",
+                    query: "",
+                    cursor: 0,
+                    line: 0,
+                    startLine: 1,
+                    endLine: 3,
+                  }],
+                } as T,
+                provider: "fixture",
+                model: "planner",
+              };
+            }
+            return {
+              output: { ready: true, operations: [] } as T,
+              provider: "fixture",
+              model: "planner",
+            };
+          }
+          finalInput = request.input;
+          return {
+            output: { verdict: "approve" } as T,
+            provider: "fixture",
+            model: "reviewer",
+          };
+        },
+      };
+      const app = new Adversary({ name: "adversarylabs/repository-search" });
+      let retrieval: { searches?: number; filesRead?: number } | undefined;
+      app.rule("review", async (ctx) => {
+        const result = await ctx.model.review({
+          prompt: "Trace identifier consumers.",
+          input: {},
+          schema: {
+            type: "object",
+            required: ["verdict"],
+            properties: { verdict: { const: "approve" } },
+          },
+          tools: { repository: { maxRounds: 4 } },
+        });
+        retrieval = result.retrieval;
+      });
+
+      await app.run({ input: { source: { path: root } }, model });
+
+      expect(planningCalls).toBe(3);
+      expect(JSON.stringify(finalInput)).toContain("legacyIdentifier()");
+      expect(retrieval).toMatchObject({ searches: 1, filesRead: 1 });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("shows the exact change before asking the model to judge it", async () => {
     const root = await mkdtemp(join(tmpdir(), "adversary-sdk-change-tools-"));
     try {
