@@ -11,6 +11,7 @@ import {
   createModelFromEnvironment,
   unavailableModel,
 } from "./model.js";
+import { type RepoGraph, repoGraphFromEnvironment } from "./repo-graph.js";
 import { type RepoIndex, repoIndexFromEnvironment } from "./repo-index.js";
 import { reviewWithRepositoryTools } from "./repository-model.js";
 import {
@@ -59,6 +60,26 @@ export {
   type RepoIndexFile,
   type RepoIndexMeta,
 } from "./repo-index.js";
+
+export {
+  ADVERSARY_REPO_GRAPH_ENV,
+  REPO_GRAPH_ADAPTER_REVISION,
+  REPO_GRAPH_SCHEMA_VERSION,
+  openRepoGraph,
+  repoGraphFromEnvironment,
+  RepoGraphUnavailableError,
+  type RepoGraph,
+  type RepoGraphDiagnostic,
+  type RepoGraphEdge,
+  type RepoGraphFile,
+  type RepoGraphFileQuery,
+  type RepoGraphMeta,
+  type RepoGraphPage,
+  type RepoGraphRelationQuery,
+  type RepoGraphSymbol,
+  type RepoGraphSymbolQuery,
+  type RepoGraphTestLink,
+} from "./repo-graph.js";
 
 export {
   DEFAULT_IGNORE_DIRECTORIES,
@@ -450,6 +471,11 @@ export interface RuleContext {
    * importers). Null when the CLI did not inject ADVERSARY_REPO_INDEX.
    */
   repoIndex: RepoIndex | null;
+  /**
+   * CLI-built semantic repository graph for bounded cross-file navigation.
+   * Null when the CLI did not inject ADVERSARY_REPO_GRAPH.
+   */
+  repoGraph: RepoGraph | null;
   summary: Summary;
   cache: Map<string, unknown>;
   relpath: (path: string) => string;
@@ -494,6 +520,8 @@ export interface RunOptions {
   model?: ReviewModel;
   /** Optional repo index; defaults to loading ADVERSARY_REPO_INDEX when unset. */
   repoIndex?: RepoIndex | null;
+  /** Optional semantic repo graph; defaults to ADVERSARY_REPO_GRAPH when unset. */
+  repoGraph?: RepoGraph | null;
   review?: ReviewPolicy;
   includeSuppressed?: boolean;
   includeRawObservations?: boolean;
@@ -682,6 +710,8 @@ export class Adversary {
     const change = normalizeChangeContext(options.input.change);
     const repoIndex =
       options.repoIndex !== undefined ? options.repoIndex : await repoIndexFromEnvironment();
+    const repoGraph =
+      options.repoGraph !== undefined ? options.repoGraph : await repoGraphFromEnvironment();
     const context = createRuleContext(
       repoPath,
       change,
@@ -691,6 +721,7 @@ export class Adversary {
       registry,
       options.model ?? unavailableModel(),
       repoIndex,
+      repoGraph,
     );
     const includeSuppressed = options.includeSuppressed;
 
@@ -1150,6 +1181,7 @@ function createRuleContext(
   registry: RuleRegistry,
   model: ReviewModel,
   repoIndex: RepoIndex | null,
+  repoGraph: RepoGraph | null,
 ): RuleContext {
   const absoluteRepoPath = resolve(repoPath);
 
@@ -1157,6 +1189,7 @@ function createRuleContext(
     repoPath: absoluteRepoPath,
     change,
     repoIndex,
+    repoGraph,
     summary,
     cache,
     model: enhanceReviewModel(model, absoluteRepoPath),
