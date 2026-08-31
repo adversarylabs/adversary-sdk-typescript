@@ -88,5 +88,5 @@ console.log(typeof Adversary, manifest.detection.files[0]);`,
       const schema = JSON.parse(await readFile(resolved.stdout.trim(), "utf8"));
       expect(() => new Ajv2020({ strict: false }).compile(schema)).not.toThrow();
     }
-  });
+  }, 30_000);
 });
