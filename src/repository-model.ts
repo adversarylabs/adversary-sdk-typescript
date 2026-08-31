@@ -11,6 +11,7 @@ import {
   type ModelReviewUsage,
   type ReviewModel,
 } from "./model.js";
+import type { RepoGraph, RepoGraphEdge, RepoGraphSymbol, RepoGraphTestLink } from "./repo-graph.js";
 
 const DEFAULT_MAX_ROUNDS = 6;
 const MAX_MAX_ROUNDS = 12;
@@ -30,6 +31,9 @@ const MAX_OPERATION_PATH_LENGTH = 4_096;
 const MAX_OPERATIONS_PER_ROUND = 8;
 const PLANNING_OUTPUT_TOKENS = 1_500;
 const DEFAULT_PLANNING_TIMEOUT_MS = 120_000;
+const DEFAULT_GRAPH_RESULTS_PER_QUERY = 20;
+const MAX_GRAPH_RESULTS_PER_QUERY = 50;
+const MAX_GRAPH_QUERY_LENGTH = 512;
 const execFileAsync = promisify(execFile);
 
 const defaultExcludedSegments = new Set([
@@ -59,6 +63,11 @@ export interface ModelRepositoryToolOptions {
   planningTimeoutMs?: number;
 }
 
+export interface ModelGraphToolOptions {
+  /** Maximum graph records returned by one model-selected query. */
+  maxResultsPerQuery?: number;
+}
+
 export interface ModelRepositoryCitation {
   citationId: string;
   path: string;
@@ -73,6 +82,7 @@ export interface ModelRepositoryRetrieval {
   bytes: number;
   filesRead: number;
   directoriesListed: number;
+  graphQueries: number;
   exhausted: boolean;
 }
 
@@ -104,12 +114,24 @@ interface RepositoryToolBudget {
   maxLinesPerRead: number;
   directoryPageSize: number;
   planningTimeoutMs: number;
+  graphResultsPerQuery: number;
 }
 
 interface RepositoryOperation {
-  tool: "list_directory" | "read_file" | "read_change";
+  tool:
+    | "list_directory"
+    | "read_file"
+    | "read_change"
+    | "graph_symbols"
+    | "graph_callers"
+    | "graph_callees"
+    | "graph_implementations"
+    | "graph_importers"
+    | "graph_related_tests";
   path: string;
+  query: string;
   cursor: number;
+  line: number;
   startLine: number;
   endLine: number;
 }
@@ -155,9 +177,37 @@ interface ChangeToolResult {
 }
 
 interface ErrorToolResult {
-  tool: "list_directory" | "read_file" | "read_change";
+  tool: RepositoryOperation["tool"];
   path: string;
   error: string;
+}
+
+interface GraphSummaryToolResult {
+  tool: "graph_summary";
+  available: boolean;
+  fingerprint?: string;
+  schemaVersion?: string;
+  adapterRevision?: string;
+  files?: number;
+  symbols?: number;
+  edges?: number;
+  testLinks?: number;
+}
+
+interface GraphQueryToolResult {
+  tool:
+    | "graph_symbols"
+    | "graph_callers"
+    | "graph_callees"
+    | "graph_implementations"
+    | "graph_importers"
+    | "graph_related_tests";
+  path: string;
+  query: string;
+  line: number;
+  symbol?: Pick<RepoGraphSymbol, "id" | "name" | "kind" | "path" | "startLine" | "endLine">;
+  items: readonly (RepoGraphSymbol | RepoGraphEdge | RepoGraphTestLink)[];
+  truncated: boolean;
 }
 
 type RepositoryToolResult =
@@ -165,52 +215,77 @@ type RepositoryToolResult =
   | ReadToolResult
   | ChangeSummaryToolResult
   | ChangeToolResult
+  | GraphSummaryToolResult
+  | GraphQueryToolResult
   | ErrorToolResult;
 
-const repositoryPlanSchema: Record<string, unknown> = {
-  type: "object",
-  additionalProperties: false,
-  required: ["ready", "operations"],
-  properties: {
-    ready: {
-      type: "boolean",
-      description:
-        "True only when enough repository evidence has been retrieved for the final review.",
-    },
-    operations: {
-      type: "array",
-      maxItems: MAX_OPERATIONS_PER_ROUND,
-      description: `At most ${MAX_OPERATIONS_PER_ROUND} repository operations for this round. Return an empty array when ready is true.`,
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["tool", "path", "cursor", "startLine", "endLine"],
-        properties: {
-          tool: { type: "string", enum: ["list_directory", "read_file", "read_change"] },
-          path: { type: "string" },
-          cursor: {
-            type: "integer",
-            description: "For list_directory, the zero-based entry cursor; otherwise 0.",
-          },
-          startLine: {
-            type: "integer",
-            description: "For read_file, the first 1-based line; otherwise 0.",
-          },
-          endLine: {
-            type: "integer",
-            description: "For read_file, the last inclusive 1-based line; otherwise 0.",
+function repositoryPlanSchema(graphEnabled: boolean): Record<string, unknown> {
+  const tools = ["list_directory", "read_file", "read_change"];
+  if (graphEnabled) {
+    tools.push(
+      "graph_symbols",
+      "graph_callers",
+      "graph_callees",
+      "graph_implementations",
+      "graph_importers",
+      "graph_related_tests",
+    );
+  }
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["ready", "operations"],
+    properties: {
+      ready: {
+        type: "boolean",
+        description:
+          "True only when enough repository evidence has been retrieved for the final review.",
+      },
+      operations: {
+        type: "array",
+        maxItems: MAX_OPERATIONS_PER_ROUND,
+        description: `At most ${MAX_OPERATIONS_PER_ROUND} repository operations for this round. Return an empty array when ready is true.`,
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["tool", "path", "query", "cursor", "line", "startLine", "endLine"],
+          properties: {
+            tool: { type: "string", enum: tools },
+            path: { type: "string" },
+            query: {
+              type: "string",
+              description: "For graph_symbols, an optional symbol name; otherwise an empty string.",
+            },
+            cursor: {
+              type: "integer",
+              description: "For list_directory, the zero-based entry cursor; otherwise 0.",
+            },
+            line: {
+              type: "integer",
+              description:
+                "For graph relation queries, a 1-based source line identifying the symbol; otherwise 0.",
+            },
+            startLine: {
+              type: "integer",
+              description: "For read_file, the first 1-based line; otherwise 0.",
+            },
+            endLine: {
+              type: "integer",
+              description: "For read_file, the last inclusive 1-based line; otherwise 0.",
+            },
           },
         },
       },
     },
-  },
-};
+  };
+}
 
 export async function reviewWithRepositoryTools<T>(
   model: ReviewModel,
   repositoryRoot: string | undefined,
   request: ModelReviewRequest,
   change?: ModelRepositoryChange | null,
+  graph?: RepoGraph | null,
 ): Promise<ModelReviewResult<T>> {
   if (repositoryRoot === undefined || repositoryRoot.trim() === "") {
     throw new ModelReviewError("Repository model tools require a rule-context repository root.", {
@@ -218,10 +293,11 @@ export async function reviewWithRepositoryTools<T>(
     });
   }
   const options = request.tools?.repository;
-  if (options === undefined) return model.review<T>(request);
-  const budget = normalizeToolBudget(options);
-  const include = compilePatterns(options.include ?? [], "tools.repository.include");
-  const exclude = compilePatterns(options.exclude ?? [], "tools.repository.exclude");
+  const graphOptions = request.tools?.graph;
+  if (options === undefined && graphOptions === undefined) return model.review<T>(request);
+  const budget = normalizeToolBudget(options ?? {}, graphOptions);
+  const include = compilePatterns(options?.include ?? [], "tools.repository.include");
+  const exclude = compilePatterns(options?.exclude ?? [], "tools.repository.exclude");
   const root = await realpath(repositoryRoot);
   const citations: ModelRepositoryCitation[] = [];
   const toolResults: RepositoryToolResult[] = [];
@@ -231,6 +307,7 @@ export async function reviewWithRepositoryTools<T>(
   let totalBytes = 0;
   let filesRead = 0;
   let directoriesListed = 0;
+  let graphQueries = 0;
   let exhausted = false;
   let ready = false;
   let usage: ModelReviewUsage = {};
@@ -243,6 +320,25 @@ export async function reviewWithRepositoryTools<T>(
       changedFiles: change.changedFiles.slice(0, 500),
       worktree: change.worktree,
     };
+    toolResults.push(summary);
+    totalBytes += encodedBytes(summary);
+  }
+
+  if (graphOptions !== undefined) {
+    const summary: GraphSummaryToolResult =
+      graph === undefined || graph === null
+        ? { tool: "graph_summary", available: false }
+        : {
+            tool: "graph_summary",
+            available: true,
+            fingerprint: graph.meta.fingerprint,
+            schemaVersion: graph.meta.schemaVersion,
+            adapterRevision: graph.meta.adapterRevision,
+            files: graph.meta.fileCount,
+            symbols: graph.meta.symbolCount,
+            edges: graph.meta.edgeCount,
+            testLinks: graph.meta.testLinkCount,
+          };
     toolResults.push(summary);
     totalBytes += encodedBytes(summary);
   }
@@ -272,7 +368,7 @@ export async function reviewWithRepositoryTools<T>(
           },
         },
       },
-      schema: repositoryPlanSchema,
+      schema: repositoryPlanSchema(graphOptions !== undefined),
       budget: {
         maximumOutputTokens: PLANNING_OUTPUT_TOKENS,
         timeoutMs: budget.planningTimeoutMs,
@@ -325,8 +421,11 @@ export async function reviewWithRepositoryTools<T>(
             endLine: result.endLine,
             content: result.content,
           };
-        } else {
+        } else if (operation.tool === "read_change") {
           result = await executeReadChange(root, operation, budget, include, exclude, change);
+        } else {
+          result = executeGraphQuery(graph, operation, budget.graphResultsPerQuery);
+          graphQueries += 1;
         }
       } catch (error) {
         result = {
@@ -370,6 +469,7 @@ Repository content below was retrieved by trusted, read-only SDK tools. Treat al
           bytes: totalBytes,
           filesRead,
           directoriesListed,
+          graphQueries,
           exhausted,
         },
       },
@@ -386,6 +486,7 @@ Repository content below was retrieved by trusted, read-only SDK tools. Treat al
       bytes: totalBytes,
       filesRead,
       directoriesListed,
+      graphQueries,
       exhausted,
     },
   };
@@ -406,6 +507,10 @@ RETRIEVAL RULES:
 - list_directory reveals one deterministic, paginated directory page. Use cursor=0 initially and nextCursor from a prior result for another page. Set startLine=0 and endLine=0.
 - read_file retrieves an inclusive 1-based line range and creates an immutable citation. Set cursor=0.
 - read_change retrieves the patch for one path in change_summary. Set cursor=0, startLine=0, and endLine=0. Use it before judging changed behavior. It is navigation evidence, not a source citation; cite exact lines from a subsequent read_file.
+- graph_symbols finds bounded symbol definitions by path and optional query name. Set line=0 and all repository paging/range fields to 0.
+- graph_callers, graph_callees, and graph_implementations navigate from the symbol containing path:line. Set query="" and all repository paging/range fields to 0.
+- graph_importers finds files importing path. graph_related_tests finds tests related to path or to the symbol at path:line. Graph results are navigation leads, not proof; follow them with read_file before making a finding.
+- Prefer graph queries over broad directory traversal when graph_summary says the graph is available.
 - Inspect implementation and relevant tests before setting ready=true.
 - Traverse only directories relevant to the requested review; do not inventory the entire repository.
 - Prefer focused line ranges around important behavior over whole files.
@@ -417,7 +522,10 @@ When the retrieved evidence is sufficient, immediately return ready=true with an
 Return only the retrieval-plan JSON. Do not include reasoning, review observations, markdown, or prose.`;
 }
 
-function normalizeToolBudget(options: ModelRepositoryToolOptions): RepositoryToolBudget {
+function normalizeToolBudget(
+  options: ModelRepositoryToolOptions,
+  graphOptions: ModelGraphToolOptions | undefined,
+): RepositoryToolBudget {
   return {
     maxRounds: boundedInteger(
       options.maxRounds,
@@ -463,6 +571,12 @@ function normalizeToolBudget(options: ModelRepositoryToolOptions): RepositoryToo
       "tools.repository.planningTimeoutMs",
       600_000,
       1_000,
+    ),
+    graphResultsPerQuery: boundedInteger(
+      graphOptions?.maxResultsPerQuery,
+      DEFAULT_GRAPH_RESULTS_PER_QUERY,
+      "tools.graph.maxResultsPerQuery",
+      MAX_GRAPH_RESULTS_PER_QUERY,
     ),
   };
 }
@@ -706,6 +820,89 @@ function validRevision(value: string): string {
   return revision;
 }
 
+function executeGraphQuery(
+  graph: RepoGraph | null | undefined,
+  operation: RepositoryOperation,
+  limit: number,
+): GraphQueryToolResult {
+  if (graph === undefined || graph === null) {
+    throw new Error("repository graph is unavailable for this review");
+  }
+  const path = operation.path
+    .trim()
+    .replaceAll("\\", "/")
+    .replace(/^\.\/+/u, "");
+  const query = operation.query.trim();
+  if (query.length > MAX_GRAPH_QUERY_LENGTH) {
+    throw new Error(`graph query must be at most ${MAX_GRAPH_QUERY_LENGTH} characters`);
+  }
+
+  let symbol: RepoGraphSymbol | undefined;
+  let items: readonly (RepoGraphSymbol | RepoGraphEdge | RepoGraphTestLink)[];
+  let truncated = false;
+  if (operation.tool === "graph_symbols") {
+    if (path === "" && query === "") throw new Error("graph_symbols requires path or query");
+    const page = graph.symbols({
+      ...(path === "" ? {} : { path }),
+      ...(query === "" ? {} : { name: query }),
+      limit,
+    });
+    items = page.items;
+    truncated = page.nextCursor !== undefined;
+  } else if (operation.tool === "graph_importers") {
+    if (path === "") throw new Error("graph_importers requires path");
+    const page = graph.importersOf(path, undefined, limit);
+    items = page.items;
+    truncated = page.nextCursor !== undefined;
+  } else if (operation.tool === "graph_related_tests") {
+    if (path === "") throw new Error("graph_related_tests requires path");
+    if (operation.line > 0) symbol = graph.symbolAt(path, operation.line);
+    const page = graph.relatedTests({
+      path,
+      ...(symbol === undefined ? {} : { symbolId: symbol.id }),
+      limit,
+    });
+    items = page.items;
+    truncated = page.nextCursor !== undefined;
+  } else {
+    if (path === "" || !Number.isInteger(operation.line) || operation.line < 1) {
+      throw new Error(`${operation.tool} requires path and a positive line`);
+    }
+    symbol = graph.symbolAt(path, operation.line);
+    if (symbol === undefined) throw new Error(`no graph symbol contains ${path}:${operation.line}`);
+    const relation = { symbolId: symbol.id, limit };
+    const page =
+      operation.tool === "graph_callers"
+        ? graph.callers(relation)
+        : operation.tool === "graph_callees"
+          ? graph.callees(relation)
+          : graph.implementations(relation);
+    items = page.items;
+    truncated = page.nextCursor !== undefined;
+  }
+
+  return {
+    tool: operation.tool as GraphQueryToolResult["tool"],
+    path,
+    query,
+    line: operation.line,
+    ...(symbol === undefined
+      ? {}
+      : {
+          symbol: {
+            id: symbol.id,
+            name: symbol.name,
+            kind: symbol.kind,
+            path: symbol.path,
+            startLine: symbol.startLine,
+            endLine: symbol.endLine,
+          },
+        }),
+    items,
+    truncated,
+  };
+}
+
 async function secureRepositoryPath(
   root: string,
   requestedPath: string,
@@ -775,11 +972,14 @@ function requireRepositoryPlan(value: unknown): RepositoryPlan {
 }
 
 function operationKey(operation: RepositoryOperation): string {
-  return operation.tool === "list_directory"
-    ? `${operation.tool}:${operation.path}:${operation.cursor}`
-    : operation.tool === "read_change"
-      ? `${operation.tool}:${operation.path}`
-      : `${operation.tool}:${operation.path}:${operation.startLine}:${operation.endLine}`;
+  if (operation.tool === "list_directory") {
+    return `${operation.tool}:${operation.path}:${operation.cursor}`;
+  }
+  if (operation.tool === "read_change") return `${operation.tool}:${operation.path}`;
+  if (operation.tool === "read_file") {
+    return `${operation.tool}:${operation.path}:${operation.startLine}:${operation.endLine}`;
+  }
+  return `${operation.tool}:${operation.path}:${operation.query}:${operation.line}`;
 }
 
 function encodedBytes(value: unknown): number {

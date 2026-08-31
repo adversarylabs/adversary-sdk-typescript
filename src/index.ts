@@ -42,6 +42,7 @@ export {
   type ReviewModel,
 } from "./model.js";
 export type {
+  ModelGraphToolOptions,
   ModelRepositoryCitation,
   ModelRepositoryChange,
   ModelRepositoryRetrieval,
@@ -1193,7 +1194,7 @@ function createRuleContext(
     repoGraph,
     summary,
     cache,
-    model: enhanceReviewModel(model, absoluteRepoPath, change),
+    model: enhanceReviewModel(model, absoluteRepoPath, change, repoGraph),
     relpath(path: string): string {
       return relative(absoluteRepoPath, isAbsolute(path) ? path : resolve(absoluteRepoPath, path));
     },
@@ -1995,12 +1996,13 @@ export function enhanceReviewModel(
   model: ReviewModel,
   repositoryRoot?: string,
   change?: ChangeContext | null,
+  repoGraph?: RepoGraph | null,
 ): ContextualReviewModel {
   return {
     review: (request) =>
-      request.tools?.repository === undefined
+      request.tools?.repository === undefined && request.tools?.graph === undefined
         ? model.review(request)
-        : reviewWithRepositoryTools(model, repositoryRoot, request, change),
+        : reviewWithRepositoryTools(model, repositoryRoot, request, change, repoGraph),
     concern: (request) => rewriteOpinionConcern(model, request),
   };
 }

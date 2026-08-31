@@ -1,5 +1,6 @@
 import { Ajv2020 } from "ajv/dist/2020.js";
 import type {
+  ModelGraphToolOptions,
   ModelRepositoryCitation,
   ModelRepositoryRetrieval,
   ModelRepositoryToolOptions,
@@ -32,7 +33,8 @@ export interface ModelReviewRequest {
   schema: Record<string, unknown>;
   budget?: ModelReviewBudget;
   tools?: {
-    repository: ModelRepositoryToolOptions;
+    repository?: ModelRepositoryToolOptions;
+    graph?: ModelGraphToolOptions;
   };
 }
 
@@ -192,9 +194,9 @@ export class BrokerReviewModel implements ReviewModel {
   }
 
   async review<T = unknown>(request: ModelReviewRequest): Promise<ModelReviewResult<T>> {
-    if (request.tools?.repository !== undefined) {
+    if (request.tools?.repository !== undefined || request.tools?.graph !== undefined) {
       throw new ModelReviewError(
-        "Repository model tools require ctx.model so the SDK can enforce the repository boundary.",
+        "Repository and graph model tools require ctx.model so the SDK can enforce the repository boundary.",
         { code: "invalid_model_request" },
       );
     }

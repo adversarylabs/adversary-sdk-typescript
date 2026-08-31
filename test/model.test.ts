@@ -12,6 +12,7 @@ import {
   type ModelReviewError,
   type ModelReviewRequest,
   ModelUnavailableError,
+  type RepoGraph,
   type ReviewModel,
   unavailableModel,
 } from "../src/index.js";
@@ -497,6 +498,164 @@ describe("model review capability", () => {
       expect(planningCalls).toBe(3);
       expect(JSON.stringify(finalInput)).toContain("+  return 'broken';");
       expect(JSON.stringify(finalInput)).toContain("repo:read:1");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("lets the model navigate the shared graph before reading source evidence", async () => {
+    const root = await mkdtemp(join(tmpdir(), "adversary-sdk-graph-tools-"));
+    try {
+      await mkdir(join(root, "src"));
+      await writeFile(join(root, "src", "service.ts"), "export function serve() {}\n");
+      await writeFile(
+        join(root, "src", "caller.ts"),
+        "import { serve } from './service.js';\nexport function start() { serve(); }\n",
+      );
+      const symbol = {
+        id: 1,
+        name: "serve",
+        kind: "function",
+        path: "src/service.ts",
+        startLine: 1,
+        startColumn: 1,
+        endLine: 1,
+        endColumn: 27,
+        exported: true,
+        language: "typescript",
+      };
+      const empty = { items: [] };
+      const graph: RepoGraph = {
+        dir: "/fixture/graph",
+        meta: {
+          schemaVersion: "v2",
+          adapterRevision: "fixture",
+          fingerprint: "fixture-graph",
+          repoPath: root,
+          builtAt: new Date(0).toISOString(),
+          durationMs: 1,
+          fileCount: 2,
+          symbolCount: 2,
+          edgeCount: 1,
+          testLinkCount: 0,
+        },
+        files: () => empty,
+        symbolAt: (path, line) => (path === symbol.path && line === 1 ? symbol : undefined),
+        symbols: () => ({ items: [symbol] }),
+        definitions: () => ({ items: [symbol] }),
+        references: () => empty,
+        callers: () => ({
+          items: [
+            {
+              id: 1,
+              fromPath: "src/caller.ts",
+              fromSymbolId: 2,
+              toPath: "src/service.ts",
+              toSymbolId: 1,
+              kind: "calls",
+              line: 2,
+              column: 27,
+              confidence: 1,
+              adapter: "fixture",
+            },
+          ],
+        }),
+        callees: () => empty,
+        implementations: () => empty,
+        importsOf: () => empty,
+        importersOf: () => empty,
+        relatedTests: () => empty,
+        close: () => undefined,
+      };
+
+      let planningCalls = 0;
+      let finalInput: unknown;
+      const model: ReviewModel = {
+        async review<T>(request: ModelReviewRequest) {
+          const properties = request.schema.properties as Record<string, unknown> | undefined;
+          if (properties?.ready !== undefined) {
+            planningCalls += 1;
+            const encoded = JSON.stringify(request.input);
+            if (planningCalls === 1) {
+              expect(encoded).toContain('"tool":"graph_summary"');
+              expect(encoded).toContain('"fingerprint":"fixture-graph"');
+              return {
+                output: {
+                  ready: false,
+                  operations: [
+                    {
+                      tool: "graph_callers",
+                      path: "src/service.ts",
+                      query: "",
+                      cursor: 0,
+                      line: 1,
+                      startLine: 0,
+                      endLine: 0,
+                    },
+                  ],
+                } as T,
+                provider: "fixture",
+                model: "planner",
+              };
+            }
+            if (planningCalls === 2) {
+              expect(encoded).toContain('"tool":"graph_callers"');
+              expect(encoded).toContain("src/caller.ts");
+              return {
+                output: {
+                  ready: false,
+                  operations: [
+                    {
+                      tool: "read_file",
+                      path: "src/caller.ts",
+                      query: "",
+                      cursor: 0,
+                      line: 0,
+                      startLine: 1,
+                      endLine: 2,
+                    },
+                  ],
+                } as T,
+                provider: "fixture",
+                model: "planner",
+              };
+            }
+            return {
+              output: { ready: true, operations: [] } as T,
+              provider: "fixture",
+              model: "planner",
+            };
+          }
+          finalInput = request.input;
+          return {
+            output: { verdict: "approve" } as T,
+            provider: "fixture",
+            model: "reviewer",
+          };
+        },
+      };
+      const app = new Adversary({ name: "adversarylabs/graph-tools" });
+      let retrieval: { graphQueries?: number; filesRead?: number } | undefined;
+      app.rule("review", async (ctx) => {
+        const result = await ctx.model.review({
+          prompt: "Trace callers before reviewing.",
+          input: {},
+          schema: {
+            type: "object",
+            required: ["verdict"],
+            properties: { verdict: { const: "approve" } },
+          },
+          tools: { repository: { maxRounds: 4 }, graph: { maxResultsPerQuery: 10 } },
+        });
+        retrieval = result.retrieval;
+      });
+
+      await app.run({ input: { source: { path: root } }, model, repoGraph: graph });
+
+      expect(planningCalls).toBe(3);
+      expect(JSON.stringify(finalInput)).toContain("src/caller.ts");
+      expect(JSON.stringify(finalInput)).toContain("serve();");
+      expect(retrieval).toMatchObject({ graphQueries: 1, filesRead: 1 });
     } finally {
       await rm(root, { recursive: true, force: true });
     }
