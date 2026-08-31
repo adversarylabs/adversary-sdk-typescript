@@ -145,6 +145,53 @@ describe("model review capability", () => {
     });
   });
 
+  it("retries transient broker failures within the original review timeout", async () => {
+    let requests = 0;
+    const server = createServer((_request, response) => {
+      requests += 1;
+      response.setHeader("content-type", "application/json");
+      if (requests < 3) {
+        response.statusCode = 502;
+        response.end(
+          JSON.stringify({
+            error: { code: "bad_gateway", message: "temporary gateway failure", retryable: true },
+          }),
+        );
+        return;
+      }
+      response.end(
+        JSON.stringify({
+          protocolVersion: ADVERSARY_MODEL_PROTOCOL_VERSION,
+          provider: "fixture",
+          model: "reviewer-v1",
+          output: { verdict: "approve" },
+        }),
+      );
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address() as AddressInfo;
+    const model = new BrokerReviewModel(`http://127.0.0.1:${address.port}`, "secret", {
+      maximumAttempts: 3,
+      initialRetryDelayMs: 0,
+      random: () => 0,
+    });
+
+    const result = await model.review<{ verdict: string }>({
+      prompt: "Review.",
+      input: {},
+      schema: {
+        type: "object",
+        required: ["verdict"],
+        properties: { verdict: { const: "approve" } },
+      },
+      budget: { timeoutMs: 5_000 },
+    });
+
+    expect(requests).toBe(3);
+    expect(result.output).toEqual({ verdict: "approve" });
+  });
+
   it("rejects a broker answer that violates the adversary schema", async () => {
     const server = createServer((_request, response) => {
       response.setHeader("content-type", "application/json");

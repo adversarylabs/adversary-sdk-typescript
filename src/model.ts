@@ -17,6 +17,9 @@ const MAX_PROMPT_BYTES = 256 << 10;
 const MAX_INPUT_BYTES = 4 << 20;
 const MAX_SCHEMA_BYTES = 512 << 10;
 const MAX_RESPONSE_BYTES = 4 << 20;
+const DEFAULT_BROKER_MAXIMUM_ATTEMPTS = 3;
+const DEFAULT_BROKER_RETRY_DELAY_MS = 250;
+const MAX_BROKER_RETRY_DELAY_MS = 5_000;
 
 export interface ModelReviewBudget {
   maximumOutputTokens?: number;
@@ -49,6 +52,12 @@ export interface ModelReviewResult<T = unknown> {
 
 export interface ReviewModel {
   review<T = unknown>(request: ModelReviewRequest): Promise<ModelReviewResult<T>>;
+}
+
+export interface BrokerReviewModelOptions {
+  maximumAttempts?: number;
+  initialRetryDelayMs?: number;
+  random?: () => number;
 }
 
 /**
@@ -148,8 +157,11 @@ export function unavailableModel(): ReviewModel {
 export class BrokerReviewModel implements ReviewModel {
   readonly endpoint: string;
   readonly #token: string;
+  readonly #maximumAttempts: number;
+  readonly #initialRetryDelayMs: number;
+  readonly #random: () => number;
 
-  constructor(endpoint: string, token: string) {
+  constructor(endpoint: string, token: string, options: BrokerReviewModelOptions = {}) {
     const parsed = new URL(endpoint);
     if (
       parsed.protocol !== "http:" ||
@@ -170,6 +182,13 @@ export class BrokerReviewModel implements ReviewModel {
     }
     this.endpoint = parsed.toString();
     this.#token = token;
+    const maximumAttempts = options.maximumAttempts ?? DEFAULT_BROKER_MAXIMUM_ATTEMPTS;
+    const initialRetryDelayMs = options.initialRetryDelayMs ?? DEFAULT_BROKER_RETRY_DELAY_MS;
+    requireIntegerRange(maximumAttempts, "maximumAttempts", 1, 5);
+    requireIntegerRange(initialRetryDelayMs, "initialRetryDelayMs", 0, MAX_BROKER_RETRY_DELAY_MS);
+    this.#maximumAttempts = maximumAttempts;
+    this.#initialRetryDelayMs = initialRetryDelayMs;
+    this.#random = options.random ?? Math.random;
   }
 
   async review<T = unknown>(request: ModelReviewRequest): Promise<ModelReviewResult<T>> {
@@ -183,75 +202,126 @@ export class BrokerReviewModel implements ReviewModel {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), normalized.budget.timeoutMs);
     try {
-      let response: Response;
-      try {
-        response = await fetch(this.endpoint, {
-          method: "POST",
-          headers: {
-            accept: "application/json",
-            authorization: `Bearer ${this.#token}`,
-            "content-type": "application/json",
-            "x-adversary-model-protocol": String(ADVERSARY_MODEL_PROTOCOL_VERSION),
-          },
-          body: JSON.stringify({
-            protocolVersion: ADVERSARY_MODEL_PROTOCOL_VERSION,
-            prompt: normalized.prompt,
-            input: normalized.input,
-            schema: normalized.schema,
-            budget: normalized.budget,
-          } satisfies ModelBrokerRequest),
-          signal: controller.signal,
-        });
-      } catch (error) {
-        if (controller.signal.aborted) {
-          throw modelTimeoutError(normalized.budget.timeoutMs);
+      for (let attempt = 1; attempt <= this.#maximumAttempts; attempt += 1) {
+        try {
+          return await this.#reviewOnce<T>(normalized, controller.signal);
+        } catch (error) {
+          if (
+            !(error instanceof ModelReviewError) ||
+            !error.retryable ||
+            controller.signal.aborted ||
+            attempt === this.#maximumAttempts
+          ) {
+            throw error;
+          }
+          const exponential = Math.min(
+            MAX_BROKER_RETRY_DELAY_MS,
+            this.#initialRetryDelayMs * 2 ** (attempt - 1),
+          );
+          const jittered = Math.round(exponential * (0.75 + 0.5 * this.#random()));
+          await waitForRetry(jittered, controller.signal, normalized.budget.timeoutMs);
         }
-        throw new ModelReviewError(
-          `Model broker request failed: ${error instanceof Error ? error.message : String(error)}`,
-          { code: "broker_unavailable", retryable: true },
-        );
       }
-
-      let body: string;
-      try {
-        body = await readBoundedResponse(response);
-      } catch (error) {
-        if (controller.signal.aborted) {
-          throw modelTimeoutError(normalized.budget.timeoutMs);
-        }
-        throw error;
-      }
-      let decoded: unknown;
-      try {
-        decoded = JSON.parse(body);
-      } catch {
-        throw new ModelReviewError("Model broker returned malformed JSON.", {
-          code: "invalid_broker_response",
-        });
-      }
-      if (!response.ok) {
-        const failure = decoded as ModelBrokerErrorResponse;
-        throw new ModelReviewError(
-          failure.error?.message ?? `Model broker returned HTTP ${response.status}.`,
-          {
-            code: failure.error?.code ?? "model_review_failed",
-            retryable: failure.error?.retryable ?? response.status >= 500,
-          },
-        );
-      }
-
-      const envelope = requireBrokerResponse(decoded);
-      validateModelOutput(normalized.schema, envelope.output);
-      return {
-        output: envelope.output as T,
-        provider: envelope.provider,
-        model: envelope.model,
-        ...(envelope.usage === undefined ? {} : { usage: envelope.usage }),
-      };
+      throw new ModelReviewError("Model broker retry loop exhausted unexpectedly.", {
+        code: "broker_unavailable",
+        retryable: true,
+      });
     } finally {
       clearTimeout(timeout);
     }
   }
+
+  async #reviewOnce<T>(
+    normalized: NormalizedModelReviewRequest,
+    signal: AbortSignal,
+  ): Promise<ModelReviewResult<T>> {
+    let response: Response;
+    try {
+      response = await fetch(this.endpoint, {
+        method: "POST",
+        headers: {
+          accept: "application/json",
+          authorization: `Bearer ${this.#token}`,
+          "content-type": "application/json",
+          "x-adversary-model-protocol": String(ADVERSARY_MODEL_PROTOCOL_VERSION),
+        },
+        body: JSON.stringify({
+          protocolVersion: ADVERSARY_MODEL_PROTOCOL_VERSION,
+          prompt: normalized.prompt,
+          input: normalized.input,
+          schema: normalized.schema,
+          budget: normalized.budget,
+        } satisfies ModelBrokerRequest),
+        signal,
+      });
+    } catch (error) {
+      if (signal.aborted) {
+        throw modelTimeoutError(normalized.budget.timeoutMs);
+      }
+      throw new ModelReviewError(
+        `Model broker request failed: ${error instanceof Error ? error.message : String(error)}`,
+        { code: "broker_unavailable", retryable: true },
+      );
+    }
+
+    let body: string;
+    try {
+      body = await readBoundedResponse(response);
+    } catch (error) {
+      if (signal.aborted) {
+        throw modelTimeoutError(normalized.budget.timeoutMs);
+      }
+      throw error;
+    }
+    let decoded: unknown;
+    try {
+      decoded = JSON.parse(body);
+    } catch {
+      throw new ModelReviewError("Model broker returned malformed JSON.", {
+        code: "invalid_broker_response",
+      });
+    }
+    if (!response.ok) {
+      const failure = decoded as ModelBrokerErrorResponse;
+      throw new ModelReviewError(
+        failure.error?.message ?? `Model broker returned HTTP ${response.status}.`,
+        {
+          code: failure.error?.code ?? "model_review_failed",
+          retryable: failure.error?.retryable ?? response.status >= 500,
+        },
+      );
+    }
+
+    const envelope = requireBrokerResponse(decoded);
+    validateModelOutput(normalized.schema, envelope.output);
+    return {
+      output: envelope.output as T,
+      provider: envelope.provider,
+      model: envelope.model,
+      ...(envelope.usage === undefined ? {} : { usage: envelope.usage }),
+    };
+  }
+}
+
+async function waitForRetry(
+  delayMs: number,
+  signal: AbortSignal,
+  timeoutMs: number,
+): Promise<void> {
+  if (signal.aborted) {
+    throw modelTimeoutError(timeoutMs);
+  }
+  await new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(modelTimeoutError(timeoutMs));
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, delayMs);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 function modelTimeoutError(timeoutMs: number): ModelReviewError {
