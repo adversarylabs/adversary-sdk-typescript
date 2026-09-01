@@ -1480,12 +1480,28 @@ function synthesizeObservationFindings(
   return { findings, suppressedObservations };
 }
 
+function findingEvidenceSignature(evidence: EvidenceInput[]): string {
+  return evidence
+    .map(
+      (item) =>
+        `${item.location?.file ?? item.file ?? ""}:${item.location?.line ?? item.line ?? ""}`,
+    )
+    .join("|");
+}
+
 function normalizeFindingInput(input: FindingInput, occurrence = 0): ReviewFinding {
+  // Without an explicit groupKey, dedupe on category + title + evidence rather
+  // than category alone, so distinct findings emitted by the same rule (same
+  // ruleId + category) no longer collapse into one. Identical findings still
+  // share a key and dedupe.
+  const dedupeScope =
+    input.groupKey ??
+    `${input.category}:${input.title}:${findingEvidenceSignature(input.evidence)}`;
   return omitUndefined({
     id:
       input.id ??
       stableId(
-        `${input.ruleId ?? input.title}:${input.groupKey ?? input.category}${
+        `${input.ruleId ?? input.title}:${dedupeScope}${
           input.deduplicate === false ? `:${occurrence}` : ""
         }`,
       ),

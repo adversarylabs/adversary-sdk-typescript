@@ -990,6 +990,41 @@ describe("review pipeline", () => {
     expect(output.suppressedFindings).toHaveLength(2);
   });
 
+  it("keeps distinct findings from one rule that share a category without a groupKey", async () => {
+    const app = new Adversary({ name: "adversarylabs/test" });
+
+    app.rule("manifests", (ctx) => {
+      ctx.finding({
+        ruleId: "manifests",
+        title: "Missing version",
+        category: "mold",
+        severity: "medium",
+        confidence: "high",
+        summary: "a.yaml is missing version.",
+        evidence: [{ file: "a.yaml", line: 1 }],
+      });
+      ctx.finding({
+        ruleId: "manifests",
+        title: "Missing name",
+        category: "mold",
+        severity: "medium",
+        confidence: "high",
+        summary: "b.yaml is missing name.",
+        evidence: [{ file: "b.yaml", line: 1 }],
+      });
+    });
+
+    const output = await app.run({ input: { source: { path: "/repo" } } });
+
+    // Previously these collapsed into one finding because the dedupe id used
+    // only ruleId + category.
+    expect(output.findings).toHaveLength(2);
+    expect(output.findings.map((finding) => finding.title).sort()).toEqual([
+      "Missing name",
+      "Missing version",
+    ]);
+  });
+
   it("captures completed findings, positives, review observations, assessment, and opinion", async () => {
     const app = new Adversary({
       name: "adversarylabs/test",
