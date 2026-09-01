@@ -93,9 +93,11 @@ describe("model review capability", () => {
 
   it("uses the authenticated loopback broker and validates its structured output", async () => {
     let authorization = "";
+    let connection = "";
     let body: Record<string, unknown> | undefined;
     const server = createServer(async (request, response) => {
       authorization = request.headers.authorization ?? "";
+      connection = request.headers.connection ?? "";
       const chunks: Buffer[] = [];
       for await (const chunk of request) {
         chunks.push(Buffer.from(chunk));
@@ -133,6 +135,7 @@ describe("model review capability", () => {
     });
 
     expect(authorization).toBe("Bearer execution-secret");
+    expect(connection).toBe("close");
     expect(body).toMatchObject({
       protocolVersion: ADVERSARY_MODEL_PROTOCOL_VERSION,
       prompt: "Act as a staff engineer.",

@@ -1,4 +1,5 @@
 import { Ajv2020 } from "ajv/dist/2020.js";
+import { request as nodeHTTPRequest } from "node:http";
 import type {
   ModelGraphToolOptions,
   ModelRepositoryCitation,
@@ -112,6 +113,12 @@ interface ModelBrokerErrorResponse {
     message?: string;
     retryable?: boolean;
   };
+}
+
+interface BrokerHTTPResponse {
+  status: number;
+  ok: boolean;
+  body: string;
 }
 
 type NormalizedModelReviewRequest = Omit<ModelReviewRequest, "budget"> & {
@@ -237,17 +244,12 @@ export class BrokerReviewModel implements ReviewModel {
     normalized: NormalizedModelReviewRequest,
     signal: AbortSignal,
   ): Promise<ModelReviewResult<T>> {
-    let response: Response;
+    let response: BrokerHTTPResponse;
     try {
-      response = await fetch(this.endpoint, {
-        method: "POST",
-        headers: {
-          accept: "application/json",
-          authorization: `Bearer ${this.#token}`,
-          "content-type": "application/json",
-          "x-adversary-model-protocol": String(ADVERSARY_MODEL_PROTOCOL_VERSION),
-        },
-        body: JSON.stringify({
+      response = await postBrokerRequest(
+        this.endpoint,
+        this.#token,
+        JSON.stringify({
           protocolVersion: ADVERSARY_MODEL_PROTOCOL_VERSION,
           prompt: normalized.prompt,
           input: normalized.input,
@@ -255,29 +257,23 @@ export class BrokerReviewModel implements ReviewModel {
           budget: normalized.budget,
         } satisfies ModelBrokerRequest),
         signal,
-      });
+      );
     } catch (error) {
       if (signal.aborted) {
         throw modelTimeoutError(normalized.budget.timeoutMs);
       }
+      if (error instanceof ModelReviewError) {
+        throw error;
+      }
       throw new ModelReviewError(
-        `Model broker request failed: ${error instanceof Error ? error.message : String(error)}`,
+        `Model broker request failed: ${describeError(error)}`,
         { code: "broker_unavailable", retryable: true },
       );
     }
 
-    let body: string;
-    try {
-      body = await readBoundedResponse(response);
-    } catch (error) {
-      if (signal.aborted) {
-        throw modelTimeoutError(normalized.budget.timeoutMs);
-      }
-      throw error;
-    }
     let decoded: unknown;
     try {
-      decoded = JSON.parse(body);
+      decoded = JSON.parse(response.body);
     } catch {
       throw new ModelReviewError("Model broker returned malformed JSON.", {
         code: "invalid_broker_response",
@@ -303,6 +299,77 @@ export class BrokerReviewModel implements ReviewModel {
       ...(envelope.usage === undefined ? {} : { usage: envelope.usage }),
     };
   }
+}
+
+function postBrokerRequest(
+  endpoint: string,
+  token: string,
+  body: string,
+  signal: AbortSignal,
+): Promise<BrokerHTTPResponse> {
+  return new Promise((resolve, reject) => {
+    const request = nodeHTTPRequest(endpoint, {
+      method: "POST",
+      agent: false,
+      headers: {
+        accept: "application/json",
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        "content-length": String(Buffer.byteLength(body, "utf8")),
+        "x-adversary-model-protocol": String(ADVERSARY_MODEL_PROTOCOL_VERSION),
+      },
+      signal,
+    }, (response) => {
+      const declaredValue = response.headers["content-length"];
+      const declared = Array.isArray(declaredValue) ? declaredValue[0] : declaredValue;
+      if (declared !== undefined && Number(declared) > MAX_RESPONSE_BYTES) {
+        response.destroy();
+        reject(modelResponseTooLargeError());
+        return;
+      }
+      const chunks: Buffer[] = [];
+      let size = 0;
+      response.on("data", (chunk: Buffer | string) => {
+        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        size += bytes.byteLength;
+        if (size > MAX_RESPONSE_BYTES) {
+          response.destroy();
+          reject(modelResponseTooLargeError());
+          return;
+        }
+        chunks.push(bytes);
+      });
+      response.on("end", () => {
+        const status = response.statusCode ?? 0;
+        resolve({
+          status,
+          ok: status >= 200 && status < 300,
+          body: Buffer.concat(chunks, size).toString("utf8"),
+        });
+      });
+      response.on("error", reject);
+      response.on("aborted", () => reject(new Error("broker response was aborted")));
+    });
+    request.on("error", reject);
+    request.end(body);
+  });
+}
+
+function modelResponseTooLargeError(): ModelReviewError {
+  return new ModelReviewError(`Model broker response exceeds ${MAX_RESPONSE_BYTES} bytes.`, {
+    code: "model_response_too_large",
+  });
+}
+
+function describeError(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+  const parts = [error.message];
+  let cause = error.cause;
+  while (cause instanceof Error && parts.length < 4) {
+    parts.push(cause.message);
+    cause = cause.cause;
+  }
+  return parts.filter((part, index) => part !== "" && parts.indexOf(part) === index).join(": ");
 }
 
 async function waitForRetry(
@@ -407,42 +474,6 @@ function requireIntegerRange(value: number, name: string, minimum: number, maxim
       code: "invalid_model_budget",
     });
   }
-}
-
-async function readBoundedResponse(response: Response): Promise<string> {
-  const declared = response.headers.get("content-length");
-  if (declared !== null && Number(declared) > MAX_RESPONSE_BYTES) {
-    throw new ModelReviewError(`Model broker response exceeds ${MAX_RESPONSE_BYTES} bytes.`, {
-      code: "model_response_too_large",
-    });
-  }
-  if (response.body === null) {
-    return "";
-  }
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) {
-      break;
-    }
-    size += value.byteLength;
-    if (size > MAX_RESPONSE_BYTES) {
-      await reader.cancel();
-      throw new ModelReviewError(`Model broker response exceeds ${MAX_RESPONSE_BYTES} bytes.`, {
-        code: "model_response_too_large",
-      });
-    }
-    chunks.push(value);
-  }
-  const joined = new Uint8Array(size);
-  let offset = 0;
-  for (const chunk of chunks) {
-    joined.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return new TextDecoder().decode(joined);
 }
 
 function requireBrokerResponse(value: unknown): ModelBrokerResponse {
