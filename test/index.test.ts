@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -746,6 +746,23 @@ describe("Adversary", () => {
     await app.run({
       input: { source: { path: repoPath } },
     });
+  });
+
+  it("matches root-level and nested files with a `**/` prefix", async () => {
+    const repoPath = await mkdtemp(join(tmpdir(), "adversary-sdk-glob-"));
+    await writeFile(join(repoPath, "mold.yaml"), "name: root\n");
+    await mkdir(join(repoPath, "ingots"), { recursive: true });
+    await writeFile(join(repoPath, "ingots", "mold.yaml"), "name: nested\n");
+
+    const app = new Adversary({ name: "adversarylabs/test" });
+
+    app.rule("glob", async (ctx) => {
+      // `**/` matches zero or more leading segments, so both the root-level and
+      // the nested manifest are found.
+      expect(await ctx.rglob("**/mold.yaml")).toEqual(["ingots/mold.yaml", "mold.yaml"]);
+    });
+
+    await app.run({ input: { source: { path: repoPath } } });
   });
 });
 
