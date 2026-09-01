@@ -29,7 +29,8 @@ const MAX_PATTERNS = 128;
 const MAX_PATTERN_LENGTH = 512;
 const MAX_OPERATION_PATH_LENGTH = 4_096;
 const MAX_OPERATIONS_PER_ROUND = 8;
-const PLANNING_OUTPUT_TOKENS = 1_500;
+const DEFAULT_PLANNING_OUTPUT_TOKENS = 1_500;
+const MAX_PLANNING_OUTPUT_TOKENS = 8_000;
 const DEFAULT_PLANNING_TIMEOUT_MS = 120_000;
 const DEFAULT_GRAPH_RESULTS_PER_QUERY = 20;
 const MAX_GRAPH_RESULTS_PER_QUERY = 50;
@@ -63,6 +64,7 @@ export interface ModelRepositoryToolOptions {
   maxBytesPerRead?: number;
   maxLinesPerRead?: number;
   directoryPageSize?: number;
+  planningOutputTokens?: number;
   planningTimeoutMs?: number;
 }
 
@@ -117,6 +119,7 @@ interface RepositoryToolBudget {
   maxBytesPerRead: number;
   maxLinesPerRead: number;
   directoryPageSize: number;
+  planningOutputTokens: number;
   planningTimeoutMs: number;
   graphResultsPerQuery: number;
 }
@@ -392,7 +395,7 @@ export async function reviewWithRepositoryTools<T>(
       },
       schema: repositoryPlanSchema(graphOptions !== undefined),
       budget: {
-        maximumOutputTokens: PLANNING_OUTPUT_TOKENS,
+        maximumOutputTokens: budget.planningOutputTokens,
         timeoutMs: budget.planningTimeoutMs,
       },
     });
@@ -592,6 +595,13 @@ function normalizeToolBudget(
       DEFAULT_DIRECTORY_PAGE_SIZE,
       "tools.repository.directoryPageSize",
       MAX_DIRECTORY_PAGE_SIZE,
+    ),
+    planningOutputTokens: boundedInteger(
+      options.planningOutputTokens,
+      DEFAULT_PLANNING_OUTPUT_TOKENS,
+      "tools.repository.planningOutputTokens",
+      MAX_PLANNING_OUTPUT_TOKENS,
+      256,
     ),
     planningTimeoutMs: boundedInteger(
       options.planningTimeoutMs,

@@ -258,6 +258,7 @@ describe("model review capability", () => {
           const properties = request.schema.properties as Record<string, unknown> | undefined;
           if (properties?.ready !== undefined) {
             planningCalls += 1;
+            expect(request.budget?.maximumOutputTokens).toBe(4_000);
             const encoded = JSON.stringify(request.input);
             if (planningCalls === 1) {
               expect(request.prompt).toContain("at most 8 operations");
@@ -336,6 +337,7 @@ describe("model review capability", () => {
               include: ["**/*.ts"],
               maxRounds: 4,
               maxToolCalls: 4,
+              planningOutputTokens: 4_000,
             },
           },
         });
