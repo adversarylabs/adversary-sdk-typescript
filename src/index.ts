@@ -45,6 +45,7 @@ export type {
   ModelGraphToolOptions,
   ModelRepositoryCitation,
   ModelRepositoryChange,
+  ModelRepositoryInitialOperation,
   ModelRepositoryRetrieval,
   ModelRepositoryToolOptions,
 } from "./repository-model.js";

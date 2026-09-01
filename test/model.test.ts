@@ -246,6 +246,78 @@ describe("model review capability", () => {
     ).rejects.toMatchObject<ModelReviewError>({ code: "model_timeout", retryable: true });
   });
 
+  it("reviews a trusted initial evidence packet without planning calls", async () => {
+    const root = await mkdtemp(join(tmpdir(), "adversary-sdk-initial-evidence-"));
+    try {
+      await mkdir(join(root, "src"));
+      await writeFile(
+        join(root, "src", "index.ts"),
+        "export function important(): string {\n  return 'prepared evidence';\n}\n",
+      );
+      let calls = 0;
+      let finalInput: unknown;
+      const model: ReviewModel = {
+        async review<T>(request: ModelReviewRequest) {
+          calls += 1;
+          expect((request.schema.properties as Record<string, unknown>).ready).toBeUndefined();
+          finalInput = request.input;
+          return {
+            output: { verdict: "approve" } as T,
+            provider: "fixture",
+            model: "reviewer",
+          };
+        },
+      };
+      const app = new Adversary({ name: "adversarylabs/initial-evidence" });
+      let reviewResult: Awaited<ReturnType<ReviewModel["review"]>> | undefined;
+      app.rule("review", async (ctx) => {
+        reviewResult = await ctx.model.review({
+          prompt: "Review the prepared evidence.",
+          input: {},
+          schema: {
+            type: "object",
+            required: ["verdict"],
+            properties: { verdict: { const: "approve" } },
+          },
+          tools: {
+            repository: {
+              include: ["**/*.ts"],
+              maxRounds: 0,
+              maxToolCalls: 2,
+              initialOperations: [{
+                tool: "read_file",
+                path: "src/index.ts",
+                startLine: 1,
+                endLine: 3,
+              }],
+            },
+          },
+        });
+      });
+
+      await app.run({ input: { source: { path: root } }, model });
+
+      expect(calls).toBe(1);
+      expect(JSON.stringify(finalInput)).toContain("prepared evidence");
+      expect(reviewResult?.citations).toEqual([{
+        citationId: "repo:read:1",
+        path: "src/index.ts",
+        startLine: 1,
+        endLine: 3,
+        content: "export function important(): string {\n  return 'prepared evidence';\n}",
+      }]);
+      expect(reviewResult?.retrieval).toMatchObject({
+        rounds: 0,
+        toolCalls: 1,
+        filesRead: 1,
+        directoriesListed: 0,
+        exhausted: false,
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("retrieves repository evidence through bounded planning rounds", async () => {
     const root = await mkdtemp(join(tmpdir(), "adversary-sdk-repository-tools-"));
     try {

@@ -38,6 +38,7 @@ const MAX_GRAPH_QUERY_LENGTH = 512;
 const MAX_SEARCH_QUERY_LENGTH = 256;
 const MAX_SEARCH_RESULTS = 50;
 const MAX_SEARCH_PREVIEW_LENGTH = 500;
+const MAX_INITIAL_OPERATIONS = 64;
 const execFileAsync = promisify(execFile);
 
 const defaultExcludedSegments = new Set([
@@ -66,7 +67,24 @@ export interface ModelRepositoryToolOptions {
   directoryPageSize?: number;
   planningOutputTokens?: number;
   planningTimeoutMs?: number;
+  /**
+   * Trusted repository reads to execute before any model-controlled retrieval.
+   * Set maxRounds to 0 to review only this deterministic evidence packet.
+   */
+  initialOperations?: readonly ModelRepositoryInitialOperation[];
 }
+
+export type ModelRepositoryInitialOperation =
+  | {
+      tool: "read_change";
+      path: string;
+    }
+  | {
+      tool: "read_file";
+      path: string;
+      startLine: number;
+      endLine: number;
+    };
 
 export interface ModelGraphToolOptions {
   /** Maximum graph records returned by one model-selected query. */
@@ -368,14 +386,74 @@ export async function reviewWithRepositoryTools<T>(
     totalBytes += encodedBytes(summary);
   }
 
-  const initial = fitDirectoryResult(
-    await executeListDirectory(root, ".", 0, budget.directoryPageSize, include, exclude),
-    budget.maxTotalBytes,
-  );
-  toolResults.push(initial);
-  totalBytes += encodedBytes(initial);
-  directoriesListed += 1;
-  completed.add("list_directory:.:0");
+  const initialOperations = normalizeInitialOperations(options?.initialOperations ?? []);
+  for (const operation of initialOperations) {
+    if (toolCalls >= budget.maxToolCalls || totalBytes >= budget.maxTotalBytes) {
+      exhausted = true;
+      break;
+    }
+    const key = operationKey(operation);
+    if (completed.has(key)) continue;
+    completed.add(key);
+    toolCalls += 1;
+    let result: RepositoryToolResult;
+    let pendingCitation: ModelRepositoryCitation | undefined;
+    try {
+      if (operation.tool === "read_file") {
+        result = await executeReadFile(
+          root,
+          operation,
+          budget,
+          include,
+          exclude,
+          `repo:read:${citations.length + 1}`,
+        );
+        pendingCitation = {
+          citationId: result.citationId,
+          path: result.path,
+          startLine: result.startLine,
+          endLine: result.endLine,
+          content: result.content,
+        };
+      } else {
+        result = await executeReadChange(root, operation, budget, include, exclude, change);
+      }
+    } catch (error) {
+      result = {
+        tool: operation.tool,
+        path: operation.path,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+    const bytes = encodedBytes(result);
+    if (totalBytes + bytes > budget.maxTotalBytes) {
+      exhausted = true;
+      break;
+    }
+    toolResults.push(result);
+    totalBytes += bytes;
+    if (pendingCitation !== undefined) {
+      citations.push(pendingCitation);
+      filesRead += 1;
+    }
+  }
+
+  if (budget.maxRounds > 0) {
+    if (totalBytes < budget.maxTotalBytes) {
+      const initial = fitDirectoryResult(
+        await executeListDirectory(root, ".", 0, budget.directoryPageSize, include, exclude),
+        budget.maxTotalBytes - totalBytes,
+      );
+      toolResults.push(initial);
+      totalBytes += encodedBytes(initial);
+      directoriesListed += 1;
+      completed.add("list_directory:.:0");
+    } else {
+      exhausted = true;
+    }
+  } else {
+    ready = true;
+  }
 
   while (rounds < budget.maxRounds && toolCalls < budget.maxToolCalls) {
     rounds += 1;
@@ -563,6 +641,7 @@ function normalizeToolBudget(
       DEFAULT_MAX_ROUNDS,
       "tools.repository.maxRounds",
       MAX_MAX_ROUNDS,
+      0,
     ),
     maxToolCalls: boundedInteger(
       options.maxToolCalls,
@@ -617,6 +696,56 @@ function normalizeToolBudget(
       MAX_GRAPH_RESULTS_PER_QUERY,
     ),
   };
+}
+
+function normalizeInitialOperations(
+  operations: readonly ModelRepositoryInitialOperation[],
+): RepositoryOperation[] {
+  if (operations.length > MAX_INITIAL_OPERATIONS) {
+    throw new ModelReviewError(
+      `tools.repository.initialOperations must contain at most ${MAX_INITIAL_OPERATIONS} operations.`,
+      { code: "invalid_model_request" },
+    );
+  }
+  return operations.map((operation, index) => {
+    if (operation.path.trim() === "" || operation.path.length > MAX_OPERATION_PATH_LENGTH) {
+      throw new ModelReviewError(
+        `tools.repository.initialOperations[${index}].path must be non-empty and at most ${MAX_OPERATION_PATH_LENGTH} characters.`,
+        { code: "invalid_model_request" },
+      );
+    }
+    if (operation.tool === "read_file") {
+      if (
+        !Number.isInteger(operation.startLine) ||
+        !Number.isInteger(operation.endLine) ||
+        operation.startLine < 1 ||
+        operation.endLine < operation.startLine
+      ) {
+        throw new ModelReviewError(
+          `tools.repository.initialOperations[${index}] requires a valid inclusive 1-based line range.`,
+          { code: "invalid_model_request" },
+        );
+      }
+      return {
+        tool: "read_file",
+        path: operation.path,
+        query: "",
+        cursor: 0,
+        line: 0,
+        startLine: operation.startLine,
+        endLine: operation.endLine,
+      };
+    }
+    return {
+      tool: "read_change",
+      path: operation.path,
+      query: "",
+      cursor: 0,
+      line: 0,
+      startLine: 0,
+      endLine: 0,
+    };
+  });
 }
 
 function boundedInteger(
