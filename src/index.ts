@@ -1213,11 +1213,7 @@ export function normalizeChangeContext(
 }
 
 /** Returns whether a repository-relative head-side line belongs to the patch. */
-export function isChangedLine(
-  change: ChangeContext | null,
-  path: string,
-  line: number,
-): boolean {
+export function isChangedLine(change: ChangeContext | null, path: string, line: number): boolean {
   if (change === null || !Number.isInteger(line) || line < 1) {
     return false;
   }
