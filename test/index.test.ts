@@ -124,6 +124,24 @@ describe("input loading", () => {
       'change.scan_mode must be "changed" or "all"',
     );
   });
+
+  it.each([
+    [{ path: "", startLine: 1, endLine: 2 }],
+    [{ path: "src/index.ts", startLine: 0, endLine: 2 }],
+    [{ path: "src/index.ts", startLine: 3, endLine: 2 }],
+    [{ path: "src/index.ts", startLine: 1.5, endLine: 2 }],
+  ])("rejects malformed changed ranges: %j", async (changedRanges) => {
+    const directory = await mkdtemp(join(tmpdir(), "adversary-sdk-"));
+    const inputPath = join(directory, "input.json");
+    await writeFile(
+      inputPath,
+      JSON.stringify({ source: { path: "/repo" }, change: { changed_ranges: changedRanges } }),
+    );
+
+    await expect(parseInput(inputPath)).rejects.toThrow(
+      "change.changed_ranges must contain valid path/startLine/endLine ranges",
+    );
+  });
 });
 
 describe("change context", () => {
