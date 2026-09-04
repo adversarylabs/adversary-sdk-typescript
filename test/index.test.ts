@@ -18,6 +18,7 @@ import {
   defineRule,
   formatOpinion,
   formatOpinionAsync,
+  isChangedLine,
   isOpinionConcernPhrase,
   log,
   normalizeChangeContext,
@@ -123,6 +124,24 @@ describe("input loading", () => {
       'change.scan_mode must be "changed" or "all"',
     );
   });
+
+  it.each([
+    [{ path: "", startLine: 1, endLine: 2 }],
+    [{ path: "src/index.ts", startLine: 0, endLine: 2 }],
+    [{ path: "src/index.ts", startLine: 3, endLine: 2 }],
+    [{ path: "src/index.ts", startLine: 1.5, endLine: 2 }],
+  ])("rejects malformed changed ranges: %j", async (changedRanges) => {
+    const directory = await mkdtemp(join(tmpdir(), "adversary-sdk-"));
+    const inputPath = join(directory, "input.json");
+    await writeFile(
+      inputPath,
+      JSON.stringify({ source: { path: "/repo" }, change: { changed_ranges: changedRanges } }),
+    );
+
+    await expect(parseInput(inputPath)).rejects.toThrow(
+      "change.changed_ranges must contain valid path/startLine/endLine ranges",
+    );
+  });
 });
 
 describe("change context", () => {
@@ -133,6 +152,7 @@ describe("change context", () => {
         base_ref: "origin/main",
         head_ref: "HEAD",
         changed_files: ["src/index.ts"],
+        changed_ranges: [{ path: "src/index.ts", startLine: 12, endLine: 18 }],
       }),
     ).toEqual({
       type: "diff",
@@ -140,6 +160,7 @@ describe("change context", () => {
       headRef: "HEAD",
       scanMode: "changed",
       changedFiles: ["src/index.ts"],
+      changedRanges: [{ path: "src/index.ts", startLine: 12, endLine: 18 }],
       worktree: false,
     });
   });
@@ -152,6 +173,7 @@ describe("change context", () => {
       headRef: "WORKTREE",
       scanMode: "all",
       changedFiles: [],
+      changedRanges: [],
       worktree: true,
     });
   });
@@ -175,6 +197,7 @@ describe("change context", () => {
 
     expect(Object.isFrozen(change)).toBe(true);
     expect(Object.isFrozen(change?.changedFiles)).toBe(true);
+    expect(Object.isFrozen(change?.changedRanges)).toBe(true);
   });
 
   it("exposes the normalized change on the rule context", async () => {
@@ -186,6 +209,7 @@ describe("change context", () => {
         headRef: "HEAD",
         scanMode: "changed",
         changedFiles: ["src/index.ts"],
+        changedRanges: [],
         worktree: false,
       });
     });
@@ -211,6 +235,18 @@ describe("change context", () => {
     });
 
     await app.run({ input: { source: { path: process.cwd() } } });
+  });
+
+  it("checks authoritative changed lines without rerunning Git", () => {
+    const change = normalizeChangeContext({
+      changed_files: ["src/index.ts"],
+      changed_ranges: [{ path: "src/index.ts", startLine: 12, endLine: 18 }],
+    });
+
+    expect(isChangedLine(change, "./src/index.ts", 12)).toBe(true);
+    expect(isChangedLine(change, "src/index.ts", 18)).toBe(true);
+    expect(isChangedLine(change, "src/index.ts", 19)).toBe(false);
+    expect(isChangedLine(null, "src/index.ts", 12)).toBe(false);
   });
 });
 
