@@ -420,6 +420,13 @@ export interface WireReviewResult
 /** Sentinel head_ref used when the reviewed head is the uncommitted worktree. */
 export const WORKTREE_HEAD_REF = "WORKTREE";
 
+/** An authoritative head-side line range changed by the reviewed patch. */
+export interface ChangedRange {
+  readonly path: string;
+  readonly startLine: number;
+  readonly endLine: number;
+}
+
 /** The change block of adversary.input.v1 as written by the runner. */
 export interface RuntimeChange {
   type?: string;
@@ -427,6 +434,7 @@ export interface RuntimeChange {
   head_ref?: string;
   scan_mode?: string;
   changed_files?: string[];
+  changed_ranges?: Array<{ path: string; startLine: number; endLine: number }>;
   [key: string]: unknown;
 }
 
@@ -450,6 +458,8 @@ export interface ChangeContext {
   readonly scanMode: "changed" | "all";
   /** Repository-relative paths the runner identified as changed. */
   readonly changedFiles: readonly string[];
+  /** Authoritative head-side line ranges changed by the patch, when supplied. */
+  readonly changedRanges: readonly ChangedRange[];
   /** True when the reviewed head is the uncommitted worktree. */
   readonly worktree: boolean;
 }
@@ -877,6 +887,25 @@ export async function parseInput(path = DEFAULT_INPUT_PATH): Promise<RuntimeInpu
         `Invalid input at ${path}: change.changed_files must be an array of strings.`,
       );
     }
+    const changedRanges = parsed.change.changed_ranges;
+    if (
+      changedRanges !== undefined &&
+      (!Array.isArray(changedRanges) ||
+        changedRanges.some(
+          (item) =>
+            !isRecord(item) ||
+            typeof item.path !== "string" ||
+            item.path.length === 0 ||
+            !Number.isInteger(item.startLine) ||
+            !Number.isInteger(item.endLine) ||
+            (item.startLine as number) < 1 ||
+            (item.endLine as number) < (item.startLine as number),
+        ))
+    ) {
+      throw new Error(
+        `Invalid input at ${path}: change.changed_ranges must contain valid path/startLine/endLine ranges.`,
+      );
+    }
   }
 
   return parsed as RuntimeInput;
@@ -1163,14 +1192,42 @@ export function normalizeChangeContext(
   if (scanMode !== "changed" && scanMode !== "all") {
     throw new Error(`Unsupported change scan_mode "${change.scan_mode}".`);
   }
+  const changedRanges = Object.freeze(
+    (change.changed_ranges ?? []).map((range) =>
+      Object.freeze({
+        path: range.path,
+        startLine: range.startLine,
+        endLine: range.endLine,
+      }),
+    ),
+  );
   return Object.freeze({
     ...(change.type === undefined ? {} : { type: change.type }),
     ...(change.base_ref === undefined ? {} : { baseRef: change.base_ref }),
     ...(change.head_ref === undefined ? {} : { headRef: change.head_ref }),
     scanMode,
     changedFiles: Object.freeze([...(change.changed_files ?? [])]),
+    changedRanges,
     worktree: change.head_ref === WORKTREE_HEAD_REF,
   });
+}
+
+/** Returns whether a repository-relative head-side line belongs to the patch. */
+export function isChangedLine(
+  change: ChangeContext | null,
+  path: string,
+  line: number,
+): boolean {
+  if (change === null || !Number.isInteger(line) || line < 1) {
+    return false;
+  }
+  const normalizedPath = path.replaceAll("\\", "/").replace(/^\.\//, "");
+  return change.changedRanges.some(
+    (range) =>
+      range.path.replaceAll("\\", "/").replace(/^\.\//, "") === normalizedPath &&
+      line >= range.startLine &&
+      line <= range.endLine,
+  );
 }
 
 function createRuleContext(

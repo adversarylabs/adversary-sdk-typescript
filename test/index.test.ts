@@ -18,6 +18,7 @@ import {
   defineRule,
   formatOpinion,
   formatOpinionAsync,
+  isChangedLine,
   isOpinionConcernPhrase,
   log,
   normalizeChangeContext,
@@ -133,6 +134,7 @@ describe("change context", () => {
         base_ref: "origin/main",
         head_ref: "HEAD",
         changed_files: ["src/index.ts"],
+        changed_ranges: [{ path: "src/index.ts", startLine: 12, endLine: 18 }],
       }),
     ).toEqual({
       type: "diff",
@@ -140,6 +142,7 @@ describe("change context", () => {
       headRef: "HEAD",
       scanMode: "changed",
       changedFiles: ["src/index.ts"],
+      changedRanges: [{ path: "src/index.ts", startLine: 12, endLine: 18 }],
       worktree: false,
     });
   });
@@ -152,6 +155,7 @@ describe("change context", () => {
       headRef: "WORKTREE",
       scanMode: "all",
       changedFiles: [],
+      changedRanges: [],
       worktree: true,
     });
   });
@@ -175,6 +179,7 @@ describe("change context", () => {
 
     expect(Object.isFrozen(change)).toBe(true);
     expect(Object.isFrozen(change?.changedFiles)).toBe(true);
+    expect(Object.isFrozen(change?.changedRanges)).toBe(true);
   });
 
   it("exposes the normalized change on the rule context", async () => {
@@ -186,6 +191,7 @@ describe("change context", () => {
         headRef: "HEAD",
         scanMode: "changed",
         changedFiles: ["src/index.ts"],
+        changedRanges: [],
         worktree: false,
       });
     });
@@ -211,6 +217,18 @@ describe("change context", () => {
     });
 
     await app.run({ input: { source: { path: process.cwd() } } });
+  });
+
+  it("checks authoritative changed lines without rerunning Git", () => {
+    const change = normalizeChangeContext({
+      changed_files: ["src/index.ts"],
+      changed_ranges: [{ path: "src/index.ts", startLine: 12, endLine: 18 }],
+    });
+
+    expect(isChangedLine(change, "./src/index.ts", 12)).toBe(true);
+    expect(isChangedLine(change, "src/index.ts", 18)).toBe(true);
+    expect(isChangedLine(change, "src/index.ts", 19)).toBe(false);
+    expect(isChangedLine(null, "src/index.ts", 12)).toBe(false);
   });
 });
 

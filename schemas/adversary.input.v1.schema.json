@@ -45,6 +45,20 @@
             "type": "string"
           },
           "description": "Repository-relative paths the runner identified as changed."
+        },
+        "changed_ranges": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "startLine", "endLine"],
+            "properties": {
+              "path": { "type": "string", "minLength": 1 },
+              "startLine": { "type": "integer", "minimum": 1 },
+              "endLine": { "type": "integer", "minimum": 1 }
+            }
+          },
+          "description": "Authoritative head-side line ranges changed by the patch."
         }
       }
     }
