@@ -1347,12 +1347,26 @@ async function walk(directory: string): Promise<string[]> {
 }
 
 function globPatternToRegExp(pattern: string): RegExp {
-  const source = toPosixPath(pattern)
-    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-    .replace(/\*\*/g, "\0")
-    .replace(/\*/g, "[^/]*")
-    .replace(/\?/g, "[^/]")
-    .replace(/\0/g, ".*");
+  const escaped = toPosixPath(pattern).replace(/[.+^${}()|[\]\\]/g, "\\$&");
+
+  let source = "";
+  for (let i = 0; i < escaped.length; i++) {
+    if (escaped.startsWith("**/", i)) {
+      // A `**/` segment matches zero or more leading path segments (globstar),
+      // so a root-level file matches `**/name` rather than requiring a slash.
+      source += "(?:.*/)?";
+      i += 2;
+    } else if (escaped.startsWith("**", i)) {
+      source += ".*";
+      i += 1;
+    } else if (escaped[i] === "*") {
+      source += "[^/]*";
+    } else if (escaped[i] === "?") {
+      source += "[^/]";
+    } else {
+      source += escaped[i];
+    }
+  }
 
   return new RegExp(`^${source}$`);
 }
