@@ -16,7 +16,7 @@ async function writeFixtureGraph(): Promise<string> {
     join(dir, "meta.json"),
     `${JSON.stringify({
       schemaVersion: "v2",
-      adapterRevision: "go-ast-v1+ts-syntax-v1",
+      adapterRevision: "go-semantic-v1+ts-syntax-v1",
       fingerprint: "fixture",
       repoPath: "/fixture",
       builtAt: new Date(0).toISOString(),
@@ -25,6 +25,7 @@ async function writeFixtureGraph(): Promise<string> {
       symbolCount: 2,
       edgeCount: 2,
       testLinkCount: 1,
+      factCount: 1,
     })}\n`,
   );
   const db = new DatabaseSync(join(dir, "graph.sqlite"));
@@ -33,6 +34,7 @@ async function writeFixtureGraph(): Promise<string> {
     CREATE TABLE symbols (id INTEGER PRIMARY KEY,file_id INTEGER,name TEXT,kind TEXT,start_line INTEGER,start_col INTEGER,end_line INTEGER,end_col INTEGER,container_id INTEGER,exported INTEGER,adapter_data TEXT);
     CREATE TABLE edges (id INTEGER PRIMARY KEY,from_file_id INTEGER,from_symbol_id INTEGER,to_file_id INTEGER,to_symbol_id INTEGER,unresolved_target TEXT,kind TEXT,line INTEGER,column INTEGER,confidence REAL,adapter TEXT);
     CREATE TABLE test_links (id INTEGER PRIMARY KEY,source_file_id INTEGER,source_symbol_id INTEGER,test_file_id INTEGER,test_symbol_id INTEGER,confidence REAL,reason TEXT);
+    CREATE TABLE semantic_facts (id INTEGER PRIMARY KEY,file_id INTEGER,symbol_id INTEGER,kind TEXT,line INTEGER,column INTEGER,end_line INTEGER,end_column INTEGER,confidence REAL,adapter TEXT,data TEXT);
     INSERT INTO files VALUES (1,'src/service.ts','typescript',10,'a','src/service.ts');
     INSERT INTO files VALUES (2,'src/service.test.ts','typescript',10,'b','src/service.test.ts');
     INSERT INTO symbols VALUES (1,1,'serve','function',1,0,4,1,NULL,1,'');
@@ -40,6 +42,7 @@ async function writeFixtureGraph(): Promise<string> {
     INSERT INTO edges VALUES (1,2,2,1,1,NULL,'calls',2,1,1.0,'fixture');
     INSERT INTO edges VALUES (2,2,NULL,1,NULL,NULL,'imports',1,1,1.0,'fixture');
     INSERT INTO test_links VALUES (1,1,1,2,2,0.9,'filename');
+    INSERT INTO semantic_facts VALUES (1,1,1,'go.fallible_once_initialization',2,1,3,1,1.0,'go/types','{"function":"serve","guard":"once","value":"cached","error":"cachedErr","explicitResetAfterError":false}');
   `);
   db.close();
   return dir;
@@ -53,6 +56,14 @@ describe("repo graph", () => {
     expect(graph.callers({ symbolId: 1 }).items[0]?.fromSymbolId).toBe(2);
     expect(graph.importersOf("src/service.ts").items[0]?.fromPath).toBe("src/service.test.ts");
     expect(graph.relatedTests({ symbolId: 1 }).items[0]?.testPath).toBe("src/service.test.ts");
+    expect(graph.semanticFacts({ kind: "go.fallible_once_initialization" }).items[0]?.path).toBe(
+      "src/service.ts",
+    );
+    expect(graph.goFallibleOnceInitializations().items[0]).toMatchObject({
+      function: "serve",
+      guard: "once",
+      explicitResetAfterError: false,
+    });
     graph.close();
   });
 

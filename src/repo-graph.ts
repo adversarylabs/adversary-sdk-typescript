@@ -4,7 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 
 export const ADVERSARY_REPO_GRAPH_ENV = "ADVERSARY_REPO_GRAPH";
 export const REPO_GRAPH_SCHEMA_VERSION = "v2";
-export const REPO_GRAPH_ADAPTER_REVISION = "go-ast-v1+ts-syntax-v1";
+export const REPO_GRAPH_ADAPTER_REVISION = "go-semantic-v1+ts-syntax-v1";
 
 export interface RepoGraphMeta {
   schemaVersion: string;
@@ -17,6 +17,7 @@ export interface RepoGraphMeta {
   symbolCount: number;
   edgeCount: number;
   testLinkCount: number;
+  factCount: number;
   parseFailures?: readonly RepoGraphDiagnostic[];
 }
 
@@ -73,6 +74,46 @@ export interface RepoGraphTestLink {
   reason: string;
 }
 
+export interface RepoGraphSemanticFact<T = unknown> {
+  id: number;
+  kind: string;
+  path: string;
+  module?: string;
+  symbolId?: number;
+  line: number;
+  column: number;
+  endLine: number;
+  endColumn: number;
+  confidence: number;
+  adapter: string;
+  data: T;
+}
+
+export interface RepoGraphFactQuery {
+  kind?: string;
+  path?: string;
+  module?: string;
+  cursor?: string;
+  limit?: number;
+}
+
+export interface GoFallibleOnceInitialization {
+  id: number;
+  path: string;
+  module?: string;
+  symbolId?: number;
+  line: number;
+  column: number;
+  endLine: number;
+  endColumn: number;
+  confidence: number;
+  function: string;
+  guard: string;
+  value: string;
+  error: string;
+  explicitResetAfterError: boolean;
+}
+
 export interface RepoGraphPage<T> {
   items: readonly T[];
   nextCursor?: string;
@@ -118,6 +159,10 @@ export interface RepoGraph {
     cursor?: string;
     limit?: number;
   }): RepoGraphPage<RepoGraphTestLink>;
+  semanticFacts<T = unknown>(query?: RepoGraphFactQuery): RepoGraphPage<RepoGraphSemanticFact<T>>;
+  goFallibleOnceInitializations(
+    query?: Omit<RepoGraphFactQuery, "kind">,
+  ): RepoGraphPage<GoFallibleOnceInitialization>;
   close(): void;
 }
 
@@ -268,6 +313,47 @@ class SQLiteRepoGraph implements RepoGraph {
     return testLinkPage(rows.map(testLinkRow), limit);
   }
 
+  semanticFacts<T = unknown>(
+    query: RepoGraphFactQuery = {},
+  ): RepoGraphPage<RepoGraphSemanticFact<T>> {
+    if (query.path !== undefined) validPath(query.path);
+    const { limit, cursor } = bounds(query.limit, query.cursor);
+    const rows = this.database
+      .prepare(`SELECT sf.id,sf.kind,f.path,f.module,sf.symbol_id,
+      sf.line,sf.column,sf.end_line,sf.end_column,sf.confidence,sf.adapter,sf.data
+      FROM semantic_facts sf JOIN files f ON f.id=sf.file_id
+      WHERE sf.id>? AND (?='' OR sf.kind=?) AND (?='' OR f.path=?)
+      AND (?='' OR f.module=?) ORDER BY sf.id LIMIT ?`)
+      .all(
+        cursor,
+        query.kind ?? "",
+        query.kind ?? "",
+        query.path ?? "",
+        normalizePath(query.path ?? ""),
+        query.module ?? "",
+        query.module ?? "",
+        limit + 1,
+      );
+    return page(
+      rows.map((row) => semanticFactRow<T>(row)),
+      limit,
+      (item) => item.id,
+    );
+  }
+
+  goFallibleOnceInitializations(
+    query: Omit<RepoGraphFactQuery, "kind"> = {},
+  ): RepoGraphPage<GoFallibleOnceInitialization> {
+    const facts = this.semanticFacts<GoFallibleOnceData>({
+      ...query,
+      kind: "go.fallible_once_initialization",
+    });
+    return {
+      items: facts.items.map(goFallibleOnceInitialization),
+      ...(facts.nextCursor === undefined ? {} : { nextCursor: facts.nextCursor }),
+    };
+  }
+
   close(): void {
     this.database.close();
   }
@@ -363,6 +449,58 @@ function edgeRow(row: RowRecord): RepoGraphEdge {
     column: number(row.column),
     confidence: number(row.confidence),
     adapter: text(row.adapter),
+  };
+}
+
+interface GoFallibleOnceData {
+  function: string;
+  guard: string;
+  value: string;
+  error: string;
+  explicitResetAfterError: boolean;
+}
+
+function semanticFactRow<T>(row: RowRecord): RepoGraphSemanticFact<T> {
+  return {
+    id: number(row.id),
+    kind: text(row.kind),
+    path: text(row.path),
+    ...(text(row.module) === "" ? {} : { module: text(row.module) }),
+    ...(row.symbol_id === null ? {} : { symbolId: number(row.symbol_id) }),
+    line: number(row.line),
+    column: number(row.column),
+    endLine: number(row.end_line),
+    endColumn: number(row.end_column),
+    confidence: number(row.confidence),
+    adapter: text(row.adapter),
+    data: JSON.parse(text(row.data)) as T,
+  };
+}
+
+function goFallibleOnceInitialization(
+  fact: RepoGraphSemanticFact<GoFallibleOnceData>,
+): GoFallibleOnceInitialization {
+  const data = fact.data;
+  if (
+    typeof data.function !== "string" ||
+    typeof data.guard !== "string" ||
+    typeof data.value !== "string" ||
+    typeof data.error !== "string" ||
+    typeof data.explicitResetAfterError !== "boolean"
+  ) {
+    throw new Error("malformed go.fallible_once_initialization fact");
+  }
+  return {
+    id: fact.id,
+    path: fact.path,
+    ...(fact.module === undefined ? {} : { module: fact.module }),
+    ...(fact.symbolId === undefined ? {} : { symbolId: fact.symbolId }),
+    line: fact.line,
+    column: fact.column,
+    endLine: fact.endLine,
+    endColumn: fact.endColumn,
+    confidence: fact.confidence,
+    ...data,
   };
 }
 

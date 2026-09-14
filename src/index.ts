@@ -90,6 +90,9 @@ export {
   type RepoGraphEdge,
   type RepoGraphFile,
   type RepoGraphFileQuery,
+  type RepoGraphFactQuery,
+  type RepoGraphSemanticFact,
+  type GoFallibleOnceInitialization,
   type RepoGraphMeta,
   type RepoGraphPage,
   type RepoGraphRelationQuery,
@@ -505,7 +508,9 @@ export interface RuleContext {
    */
   repoIndex: RepoIndex | null;
   /**
-   * CLI-built semantic repository graph for bounded cross-file navigation.
+   * CLI-built semantic repository graph for bounded cross-file navigation and
+   * typed language facts. Prefer its typed fact queries over reparsing source
+   * inside each adversary.
    * Null when the CLI did not inject ADVERSARY_REPO_GRAPH.
    */
   repoGraph: RepoGraph | null;
