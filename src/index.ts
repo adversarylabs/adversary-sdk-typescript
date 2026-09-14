@@ -11,6 +11,7 @@ import {
   createModelFromEnvironment,
   unavailableModel,
 } from "./model.js";
+import { type OutcomeContext, outcomeContextFromEnvironment } from "./outcome-context.js";
 import { type RepoGraph, repoGraphFromEnvironment } from "./repo-graph.js";
 import { type RepoIndex, repoIndexFromEnvironment } from "./repo-index.js";
 import { reviewWithRepositoryTools } from "./repository-model.js";
@@ -48,6 +49,21 @@ export type {
   ModelRepositoryToolOptions,
 } from "./repository-model.js";
 export { resolveModelCitation } from "./repository-model.js";
+
+export {
+  ADVERSARY_OUTCOME_CONTEXT_ENV,
+  OUTCOME_CONTEXT_MAX_FILE_BYTES,
+  OUTCOME_CONTEXT_MAX_SOURCE_CHARACTERS,
+  OUTCOME_CONTEXT_SCHEMA_VERSION,
+  openOutcomeContext,
+  outcomeContextFromEnvironment,
+  parseOutcomeContext,
+  type OutcomeContext,
+  type OutcomeContextSource,
+  type OutcomeContextSourceKind,
+  type OutcomeContextSubject,
+  type OutcomeIntent,
+} from "./outcome-context.js";
 
 export {
   ADVERSARY_REPO_INDEX_ENV,
@@ -478,6 +494,12 @@ export interface RuleContext {
    */
   change: ChangeContext | null;
   /**
+   * Bounded, source-attributed context from the host integration. Source text
+   * is untrusted and may be incomplete or misleading. Null outside a supported
+   * change integration.
+   */
+  outcomeContext: OutcomeContext | null;
+  /**
    * CLI-built local repository index for cross-file navigation (imports /
    * importers). Null when the CLI did not inject ADVERSARY_REPO_INDEX.
    */
@@ -533,6 +555,8 @@ export interface RunOptions {
   repoIndex?: RepoIndex | null;
   /** Optional semantic repo graph; defaults to ADVERSARY_REPO_GRAPH when unset. */
   repoGraph?: RepoGraph | null;
+  /** Optional outcome context; defaults to ADVERSARY_OUTCOME_CONTEXT when unset. */
+  outcomeContext?: OutcomeContext | null;
   review?: ReviewPolicy;
   includeSuppressed?: boolean;
   includeRawObservations?: boolean;
@@ -544,6 +568,7 @@ export interface EnvironmentRunOptions {
   inputPath?: string;
   outputPath?: string;
   model?: ReviewModel;
+  outcomeContext?: OutcomeContext | null;
   review?: ReviewPolicy;
   includeSuppressed?: boolean;
   includeRawObservations?: boolean;
@@ -723,6 +748,10 @@ export class Adversary {
       options.repoIndex !== undefined ? options.repoIndex : await repoIndexFromEnvironment();
     const repoGraph =
       options.repoGraph !== undefined ? options.repoGraph : await repoGraphFromEnvironment();
+    const outcomeContext =
+      options.outcomeContext !== undefined
+        ? options.outcomeContext
+        : await outcomeContextFromEnvironment();
     const context = createRuleContext(
       repoPath,
       change,
@@ -733,6 +762,7 @@ export class Adversary {
       options.model ?? unavailableModel(),
       repoIndex,
       repoGraph,
+      outcomeContext,
     );
     const includeSuppressed = options.includeSuppressed;
 
@@ -769,6 +799,7 @@ export class Adversary {
     const result = await this.run({
       input: { ...input, source: { ...input.source, path: repository } },
       model: options.model ?? createModelFromEnvironment(),
+      outcomeContext: options.outcomeContext,
       review: options.review,
       includeSuppressed:
         options.includeSuppressed ?? parseBooleanEnv(process.env.ADVERSARY_INCLUDE_SUPPRESSED),
@@ -1244,12 +1275,14 @@ function createRuleContext(
   model: ReviewModel,
   repoIndex: RepoIndex | null,
   repoGraph: RepoGraph | null,
+  outcomeContext: OutcomeContext | null,
 ): RuleContext {
   const absoluteRepoPath = resolve(repoPath);
 
   return {
     repoPath: absoluteRepoPath,
     change,
+    outcomeContext,
     repoIndex,
     repoGraph,
     summary,

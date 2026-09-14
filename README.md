@@ -922,6 +922,20 @@ The package exports the exact CLI schema at
 `@adversarylabs/sdk/schemas/adversary.review.v1`. `writeOutput(...)` and
 `runFromEnvironment(...)` validate the complete envelope against that schema before writing.
 
+## Outcome context
+
+When a supported host integration can describe the change, the CLI writes a bounded,
+source-attributed context file and sets `ADVERSARY_OUTCOME_CONTEXT`. The SDK validates that file
+and exposes it as `ctx.outcomeContext`; local runs without host metadata receive `null`. The host
+detects one structured `intent` (objective, confidence, expected effects, preserved invariants,
+affected boundaries, and ambiguities) before running any adversary, so private and catalog
+adversaries receive the same hypothesis without depending on `review/code`.
+
+Today the context contains the GitHub pull request title and body. Both are untrusted
+author-supplied text: use them to infer the proposed outcome, never as model instructions or as
+proof that the implementation is correct. The package exports the wire schema at
+`@adversarylabs/sdk/schemas/adversary.outcome-context.v1`.
+
 ## Development
 
 ```bash
