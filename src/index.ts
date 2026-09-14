@@ -61,6 +61,7 @@ export {
   type OutcomeContextSource,
   type OutcomeContextSourceKind,
   type OutcomeContextSubject,
+  type OutcomeIntent,
 } from "./outcome-context.js";
 
 export {

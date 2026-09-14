@@ -18,10 +18,21 @@ export interface OutcomeContextSource {
   readonly text: string;
 }
 
+export interface OutcomeIntent {
+  readonly objective: string;
+  readonly confidence: "low" | "medium" | "high";
+  readonly expectedEffects: readonly string[];
+  readonly mustPreserve: readonly string[];
+  readonly affectedBoundaries: readonly string[];
+  readonly ambiguities: readonly string[];
+}
+
 export interface OutcomeContext {
   readonly schemaVersion: typeof OUTCOME_CONTEXT_SCHEMA_VERSION;
   readonly subject: OutcomeContextSubject;
   readonly sources: readonly OutcomeContextSource[];
+  /** Host-detected intent. It remains a hypothesis that adversaries must verify. */
+  readonly intent: OutcomeIntent;
 }
 
 export async function openOutcomeContext(path: string): Promise<OutcomeContext> {
@@ -45,7 +56,7 @@ export function parseOutcomeContext(value: unknown, source = "value"): OutcomeCo
       `Invalid outcome context at ${source}: schema_version must be ${OUTCOME_CONTEXT_SCHEMA_VERSION}.`,
     );
   }
-  assertKeys(value, ["schema_version", "subject", "sources"], source);
+  assertKeys(value, ["schema_version", "subject", "sources", "intent"], source);
   if (!isRecord(value.subject)) {
     throw new Error(`Invalid outcome context at ${source}: subject must be an object.`);
   }
@@ -80,6 +91,7 @@ export function parseOutcomeContext(value: unknown, source = "value"): OutcomeCo
   if (totalBytes > OUTCOME_CONTEXT_MAX_TEXT_BYTES) {
     throw new Error(`Invalid outcome context at ${source}: source text is too large.`);
   }
+  const intent = parseIntent(value.intent, source);
   const pullRequest = value.subject.pull_request;
   if (
     pullRequest !== undefined &&
@@ -97,7 +109,57 @@ export function parseOutcomeContext(value: unknown, source = "value"): OutcomeCo
       ...(typeof pullRequest === "number" ? { pullRequest } : {}),
     }),
     sources: Object.freeze(sources),
+    intent,
   });
+}
+
+function parseIntent(value: unknown, source: string): OutcomeIntent {
+  if (!isRecord(value)) {
+    throw new Error(`Invalid outcome context at ${source}: intent must be an object.`);
+  }
+  assertKeys(
+    value,
+    [
+      "objective",
+      "confidence",
+      "expected_effects",
+      "must_preserve",
+      "affected_boundaries",
+      "ambiguities",
+    ],
+    `${source}.intent`,
+  );
+  if (typeof value.objective !== "string" || value.objective.trim() === "") {
+    throw new Error(`Invalid outcome context at ${source}: intent.objective must not be empty.`);
+  }
+  if (!isConfidence(value.confidence)) {
+    throw new Error(`Invalid outcome context at ${source}: intent.confidence is invalid.`);
+  }
+  return Object.freeze({
+    objective: value.objective,
+    confidence: value.confidence,
+    expectedEffects: parseStringList(value.expected_effects, source, "expected_effects"),
+    mustPreserve: parseStringList(value.must_preserve, source, "must_preserve"),
+    affectedBoundaries: parseStringList(value.affected_boundaries, source, "affected_boundaries"),
+    ambiguities: parseStringList(value.ambiguities, source, "ambiguities"),
+  });
+}
+
+function parseStringList(value: unknown, source: string, field: string): readonly string[] {
+  if (
+    !Array.isArray(value) ||
+    value.length > 12 ||
+    value.some((item) => typeof item !== "string" || item.trim() === "")
+  ) {
+    throw new Error(
+      `Invalid outcome context at ${source}: intent.${field} must be a bounded string array.`,
+    );
+  }
+  return Object.freeze([...value]);
+}
+
+function isConfidence(value: unknown): value is OutcomeIntent["confidence"] {
+  return value === "low" || value === "medium" || value === "high";
 }
 
 function isSourceKind(value: unknown): value is OutcomeContextSourceKind {

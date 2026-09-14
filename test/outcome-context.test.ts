@@ -16,6 +16,14 @@ const wireContext = {
     { kind: "pull_request_title", text: "Add delegated trust" },
     { kind: "pull_request_body", text: "External registries remain untrusted." },
   ],
+  intent: {
+    objective: "Permit delegated access without widening trust.",
+    confidence: "high",
+    expected_effects: ["Delegated clients can read private artifacts."],
+    must_preserve: ["Push access remains forbidden."],
+    affected_boundaries: ["registry authorization"],
+    ambiguities: [],
+  },
 };
 
 describe("outcome context", () => {
@@ -23,6 +31,7 @@ describe("outcome context", () => {
     const context = parseOutcomeContext(wireContext);
     expect(context.subject.pullRequest).toBe(42);
     expect(context.sources[0]?.kind).toBe("pull_request_title");
+    expect(context.intent.mustPreserve).toEqual(["Push access remains forbidden."]);
     expect(Object.isFrozen(context)).toBe(true);
   });
 
