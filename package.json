@@ -24,7 +24,8 @@
     },
     "./schemas/adversary.manifest.v1": "./schemas/adversary.manifest.v1.schema.json",
     "./schemas/adversary.input.v1": "./schemas/adversary.input.v1.schema.json",
-    "./schemas/adversary.review.v1": "./schemas/adversary.review.v1.schema.json"
+    "./schemas/adversary.review.v1": "./schemas/adversary.review.v1.schema.json",
+    "./schemas/adversary.outcome-context.v1": "./schemas/adversary.outcome-context.v1.schema.json"
   },
   "files": ["dist", "schemas", "templates", "README.md"],
   "engines": {
