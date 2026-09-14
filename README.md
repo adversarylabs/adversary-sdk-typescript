@@ -244,12 +244,14 @@ The CLI can provide a cached, package-aware semantic repository graph. Rules sho
 ```ts
 const inScope = new Set(await ctx.listInScopePaths({ include: (path) => path.endsWith(".go") }));
 for (const fact of ctx.repoGraph?.allGoFallibleOnceInitializations() ?? []) {
-  if (fact.explicitResetAfterError || !inScope.has(fact.path)) continue;
+  if (!inScope.has(fact.path)) continue;
   ctx.finding({
     ruleId: "reliability.sync-once-fallible-init",
     groupKey: `reliability.sync-once-fallible-init:${fact.key}`,
-    title: "sync.Once permanently caches initialization failure",
-    summary: "A fallible dependency initialization is cached without a retry path.",
+    title: "sync.Once does not provide safe retry for fallible initialization",
+    summary: fact.unsafeResetAfterError
+      ? "The code zeroes a used sync.Once after failure, which is unsafe under concurrency."
+      : "A fallible dependency initialization is permanently cached without a retry path.",
     evidence: [{ location: { file: fact.path, line: fact.line } }],
   });
 }

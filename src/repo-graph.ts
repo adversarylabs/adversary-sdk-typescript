@@ -5,7 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 
 export const ADVERSARY_REPO_GRAPH_ENV = "ADVERSARY_REPO_GRAPH";
 export const REPO_GRAPH_SCHEMA_VERSION = "v2";
-export const REPO_GRAPH_ADAPTER_REVISION = "go-semantic-v1+ts-syntax-v1";
+export const REPO_GRAPH_ADAPTER_REVISION = "go-semantic-v2+ts-syntax-v1";
 
 export interface RepoGraphMeta {
   schemaVersion: string;
@@ -114,7 +114,8 @@ export interface GoFallibleOnceInitialization {
   guard: string;
   value: string;
   error: string;
-  explicitResetAfterError: boolean;
+  /** True when the code zeroes a used sync.Once after failure, which is not safe retry recovery. */
+  unsafeResetAfterError: boolean;
 }
 
 export interface RepoGraphPage<T> {
@@ -477,7 +478,7 @@ interface GoFallibleOnceData {
   guard: string;
   value: string;
   error: string;
-  explicitResetAfterError: boolean;
+  unsafeResetAfterError: boolean;
 }
 
 function semanticFactRow<T>(row: RowRecord): RepoGraphSemanticFact<T> {
@@ -506,7 +507,7 @@ function goFallibleOnceInitialization(
     typeof data.guard !== "string" ||
     typeof data.value !== "string" ||
     typeof data.error !== "string" ||
-    typeof data.explicitResetAfterError !== "boolean"
+    typeof data.unsafeResetAfterError !== "boolean"
   ) {
     throw new Error("malformed go.fallible_once_initialization fact");
   }

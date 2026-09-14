@@ -16,7 +16,7 @@ async function writeFixtureGraph(factCount = 1): Promise<string> {
     join(dir, "meta.json"),
     `${JSON.stringify({
       schemaVersion: "v2",
-      adapterRevision: "go-semantic-v1+ts-syntax-v1",
+      adapterRevision: "go-semantic-v2+ts-syntax-v1",
       fingerprint: "fixture",
       repoPath: "/fixture",
       builtAt: new Date(0).toISOString(),
@@ -42,7 +42,7 @@ async function writeFixtureGraph(factCount = 1): Promise<string> {
     INSERT INTO edges VALUES (1,2,2,1,1,NULL,'calls',2,1,1.0,'fixture');
     INSERT INTO edges VALUES (2,2,NULL,1,NULL,NULL,'imports',1,1,1.0,'fixture');
     INSERT INTO test_links VALUES (1,1,1,2,2,0.9,'filename');
-    INSERT INTO semantic_facts VALUES (1,1,1,'go.fallible_once_initialization',2,1,3,1,1.0,'go/types','{"function":"serve","guard":"once","value":"cached","error":"cachedErr","explicitResetAfterError":false}');
+    INSERT INTO semantic_facts VALUES (1,1,1,'go.fallible_once_initialization',2,1,3,1,1.0,'go/types','{"function":"serve","guard":"once","value":"cached","error":"cachedErr","unsafeResetAfterError":false}');
   `);
   const insertFact = db.prepare("INSERT INTO semantic_facts VALUES (?,?,?,?,?,?,?,?,?,?,?)");
   for (let id = 2; id <= factCount; id += 1) {
@@ -62,7 +62,7 @@ async function writeFixtureGraph(factCount = 1): Promise<string> {
         guard: `once${id}`,
         value: `cached${id}`,
         error: `cachedErr${id}`,
-        explicitResetAfterError: false,
+        unsafeResetAfterError: false,
       }),
     );
   }
@@ -84,7 +84,7 @@ describe("repo graph", () => {
     expect(graph.goFallibleOnceInitializations().items[0]).toMatchObject({
       function: "serve",
       guard: "once",
-      explicitResetAfterError: false,
+      unsafeResetAfterError: false,
     });
     expect(graph.goFallibleOnceInitializations().items[0]?.key).toMatch(
       /^go\.fallible_once_initialization:sha256:[a-f0-9]{64}$/,
