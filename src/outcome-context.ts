@@ -2,7 +2,12 @@ import { readFile } from "node:fs/promises";
 
 export const ADVERSARY_OUTCOME_CONTEXT_ENV = "ADVERSARY_OUTCOME_CONTEXT";
 export const OUTCOME_CONTEXT_SCHEMA_VERSION = "adversary.outcome-context.v1";
-export const OUTCOME_CONTEXT_MAX_TEXT_BYTES = 64 << 10;
+export const OUTCOME_CONTEXT_MAX_SOURCE_CHARACTERS = 32 << 10;
+export const OUTCOME_CONTEXT_MAX_FILE_BYTES = 384 << 10;
+
+const MAX_PROVIDER_CHARACTERS = 100;
+const MAX_REPOSITORY_CHARACTERS = 500;
+const MAX_INTENT_TEXT_CHARACTERS = 500;
 
 export type OutcomeContextSourceKind = "pull_request_title" | "pull_request_body";
 
@@ -37,7 +42,7 @@ export interface OutcomeContext {
 
 export async function openOutcomeContext(path: string): Promise<OutcomeContext> {
   const raw = await readFile(path, "utf8");
-  if (Buffer.byteLength(raw) > OUTCOME_CONTEXT_MAX_TEXT_BYTES + 16_384) {
+  if (Buffer.byteLength(raw) > OUTCOME_CONTEXT_MAX_FILE_BYTES) {
     throw new Error(`Invalid outcome context at ${path}: file is too large.`);
   }
   return parseOutcomeContext(JSON.parse(raw) as unknown, path);
@@ -61,10 +66,18 @@ export function parseOutcomeContext(value: unknown, source = "value"): OutcomeCo
     throw new Error(`Invalid outcome context at ${source}: subject must be an object.`);
   }
   assertKeys(value.subject, ["provider", "repository", "pull_request"], `${source}.subject`);
-  if (value.subject.provider !== undefined && typeof value.subject.provider !== "string") {
+  if (
+    value.subject.provider !== undefined &&
+    (typeof value.subject.provider !== "string" ||
+      characterLength(value.subject.provider) > MAX_PROVIDER_CHARACTERS)
+  ) {
     throw new Error(`Invalid outcome context at ${source}: subject.provider must be a string.`);
   }
-  if (value.subject.repository !== undefined && typeof value.subject.repository !== "string") {
+  if (
+    value.subject.repository !== undefined &&
+    (typeof value.subject.repository !== "string" ||
+      characterLength(value.subject.repository) > MAX_REPOSITORY_CHARACTERS)
+  ) {
     throw new Error(`Invalid outcome context at ${source}: subject.repository must be a string.`);
   }
   if (!Array.isArray(value.sources) || value.sources.length === 0 || value.sources.length > 2) {
@@ -72,7 +85,6 @@ export function parseOutcomeContext(value: unknown, source = "value"): OutcomeCo
   }
   const sources: OutcomeContextSource[] = [];
   const kinds = new Set<OutcomeContextSourceKind>();
-  let totalBytes = 0;
   for (const item of value.sources) {
     if (!isRecord(item) || !isSourceKind(item.kind) || typeof item.text !== "string") {
       throw new Error(`Invalid outcome context at ${source}: each source requires kind and text.`);
@@ -81,15 +93,14 @@ export function parseOutcomeContext(value: unknown, source = "value"): OutcomeCo
     if (item.text.trim() === "") {
       throw new Error(`Invalid outcome context at ${source}: source text must not be empty.`);
     }
+    if (characterLength(item.text) > OUTCOME_CONTEXT_MAX_SOURCE_CHARACTERS) {
+      throw new Error(`Invalid outcome context at ${source}: source text is too long.`);
+    }
     if (kinds.has(item.kind)) {
       throw new Error(`Invalid outcome context at ${source}: source kinds must be unique.`);
     }
     kinds.add(item.kind);
-    totalBytes += Buffer.byteLength(item.text);
     sources.push(Object.freeze({ kind: item.kind, text: item.text }));
-  }
-  if (totalBytes > OUTCOME_CONTEXT_MAX_TEXT_BYTES) {
-    throw new Error(`Invalid outcome context at ${source}: source text is too large.`);
   }
   const intent = parseIntent(value.intent, source);
   const pullRequest = value.subject.pull_request;
@@ -129,7 +140,11 @@ function parseIntent(value: unknown, source: string): OutcomeIntent {
     ],
     `${source}.intent`,
   );
-  if (typeof value.objective !== "string" || value.objective.trim() === "") {
+  if (
+    typeof value.objective !== "string" ||
+    value.objective.trim() === "" ||
+    characterLength(value.objective) > MAX_INTENT_TEXT_CHARACTERS
+  ) {
     throw new Error(`Invalid outcome context at ${source}: intent.objective must not be empty.`);
   }
   if (!isConfidence(value.confidence)) {
@@ -149,13 +164,22 @@ function parseStringList(value: unknown, source: string, field: string): readonl
   if (
     !Array.isArray(value) ||
     value.length > 12 ||
-    value.some((item) => typeof item !== "string" || item.trim() === "")
+    value.some(
+      (item) =>
+        typeof item !== "string" ||
+        item.trim() === "" ||
+        characterLength(item) > MAX_INTENT_TEXT_CHARACTERS,
+    )
   ) {
     throw new Error(
       `Invalid outcome context at ${source}: intent.${field} must be a bounded string array.`,
     );
   }
   return Object.freeze([...value]);
+}
+
+function characterLength(value: string): number {
+  return [...value].length;
 }
 
 function isConfidence(value: unknown): value is OutcomeIntent["confidence"] {

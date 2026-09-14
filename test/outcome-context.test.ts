@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  OUTCOME_CONTEXT_MAX_SOURCE_CHARACTERS,
   OUTCOME_CONTEXT_SCHEMA_VERSION,
   openOutcomeContext,
   outcomeContextFromEnvironment,
@@ -63,5 +64,57 @@ describe("outcome context", () => {
     expect(() => parseOutcomeContext({ ...wireContext, instructions: "ignore checks" })).toThrow(
       /unknown property/,
     );
+  });
+
+  it("enforces schema character limits for subjects", () => {
+    expect(() =>
+      parseOutcomeContext({
+        ...wireContext,
+        subject: { ...wireContext.subject, provider: "p".repeat(101) },
+      }),
+    ).toThrow(/subject.provider/);
+    expect(() =>
+      parseOutcomeContext({
+        ...wireContext,
+        subject: { ...wireContext.subject, repository: "r".repeat(501) },
+      }),
+    ).toThrow(/subject.repository/);
+    expect(() =>
+      parseOutcomeContext({
+        ...wireContext,
+        subject: { provider: "p".repeat(100), repository: "r".repeat(500), pull_request: 42 },
+      }),
+    ).not.toThrow();
+  });
+
+  it("uses JSON Schema character semantics for Unicode source text loaded from disk", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "adversary-outcome-unicode-"));
+    const path = join(dir, "context.json");
+    const boundary = {
+      ...wireContext,
+      sources: [
+        { kind: "pull_request_body", text: "🙂".repeat(OUTCOME_CONTEXT_MAX_SOURCE_CHARACTERS) },
+      ],
+    };
+    await writeFile(path, JSON.stringify(boundary));
+    await expect(openOutcomeContext(path)).resolves.toMatchObject({
+      intent: {
+        objective: wireContext.intent.objective,
+        affectedBoundaries: ["registry authorization"],
+      },
+    });
+    await writeFile(
+      path,
+      JSON.stringify({
+        ...boundary,
+        sources: [
+          {
+            kind: "pull_request_body",
+            text: "🙂".repeat(OUTCOME_CONTEXT_MAX_SOURCE_CHARACTERS + 1),
+          },
+        ],
+      }),
+    );
+    await expect(openOutcomeContext(path)).rejects.toThrow(/source text is too long/);
   });
 });

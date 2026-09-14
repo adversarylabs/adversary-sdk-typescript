@@ -52,7 +52,8 @@ export { resolveModelCitation } from "./repository-model.js";
 
 export {
   ADVERSARY_OUTCOME_CONTEXT_ENV,
-  OUTCOME_CONTEXT_MAX_TEXT_BYTES,
+  OUTCOME_CONTEXT_MAX_FILE_BYTES,
+  OUTCOME_CONTEXT_MAX_SOURCE_CHARACTERS,
   OUTCOME_CONTEXT_SCHEMA_VERSION,
   openOutcomeContext,
   outcomeContextFromEnvironment,
