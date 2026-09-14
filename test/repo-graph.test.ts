@@ -44,9 +44,7 @@ async function writeFixtureGraph(factCount = 1): Promise<string> {
     INSERT INTO test_links VALUES (1,1,1,2,2,0.9,'filename');
     INSERT INTO semantic_facts VALUES (1,1,1,'go.fallible_once_initialization',2,1,3,1,1.0,'go/types','{"function":"serve","guard":"once","value":"cached","error":"cachedErr","explicitResetAfterError":false}');
   `);
-  const insertFact = db.prepare(
-    "INSERT INTO semantic_facts VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-  );
+  const insertFact = db.prepare("INSERT INTO semantic_facts VALUES (?,?,?,?,?,?,?,?,?,?,?)");
   for (let id = 2; id <= factCount; id += 1) {
     insertFact.run(
       id,
@@ -97,7 +95,9 @@ describe("repo graph", () => {
   it("collects every typed fact across bounded graph pages", async () => {
     const graph = await openRepoGraph(await writeFixtureGraph(501));
     expect(graph.allGoFallibleOnceInitializations()).toHaveLength(501);
-    expect(new Set(graph.allGoFallibleOnceInitializations().map((fact) => fact.key)).size).toBe(501);
+    expect(new Set(graph.allGoFallibleOnceInitializations().map((fact) => fact.key)).size).toBe(
+      501,
+    );
     graph.close();
   });
 
