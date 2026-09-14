@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -99,6 +100,8 @@ export interface RepoGraphFactQuery {
 
 export interface GoFallibleOnceInitialization {
   id: number;
+  /** Stable across graph rebuilds that do not change this initialization. */
+  key: string;
   path: string;
   module?: string;
   symbolId?: number;
@@ -163,6 +166,10 @@ export interface RepoGraph {
   goFallibleOnceInitializations(
     query?: Omit<RepoGraphFactQuery, "kind">,
   ): RepoGraphPage<GoFallibleOnceInitialization>;
+  /** Return every matching fact, hiding repository-graph pagination. */
+  allGoFallibleOnceInitializations(
+    query?: Omit<RepoGraphFactQuery, "kind" | "cursor" | "limit">,
+  ): readonly GoFallibleOnceInitialization[];
   close(): void;
 }
 
@@ -354,6 +361,19 @@ class SQLiteRepoGraph implements RepoGraph {
     };
   }
 
+  allGoFallibleOnceInitializations(
+    query: Omit<RepoGraphFactQuery, "kind" | "cursor" | "limit"> = {},
+  ): readonly GoFallibleOnceInitialization[] {
+    const items: GoFallibleOnceInitialization[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = this.goFallibleOnceInitializations({ ...query, cursor, limit: 500 });
+      items.push(...page.items);
+      cursor = page.nextCursor;
+    } while (cursor !== undefined);
+    return items;
+  }
+
   close(): void {
     this.database.close();
   }
@@ -492,6 +512,7 @@ function goFallibleOnceInitialization(
   }
   return {
     id: fact.id,
+    key: stableGoFallibleOnceKey(fact, data),
     path: fact.path,
     ...(fact.module === undefined ? {} : { module: fact.module }),
     ...(fact.symbolId === undefined ? {} : { symbolId: fact.symbolId }),
@@ -502,6 +523,21 @@ function goFallibleOnceInitialization(
     confidence: fact.confidence,
     ...data,
   };
+}
+
+function stableGoFallibleOnceKey(
+  fact: RepoGraphSemanticFact<GoFallibleOnceData>,
+  data: GoFallibleOnceData,
+): string {
+  const identity = JSON.stringify([
+    fact.module ?? "",
+    fact.path,
+    data.function,
+    data.guard,
+    data.value,
+    data.error,
+  ]);
+  return `go.fallible_once_initialization:sha256:${createHash("sha256").update(identity).digest("hex")}`;
 }
 
 interface TestLinkWithID extends RepoGraphTestLink {

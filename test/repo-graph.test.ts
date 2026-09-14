@@ -9,7 +9,7 @@ import {
   repoGraphFromEnvironment,
 } from "../src/repo-graph.js";
 
-async function writeFixtureGraph(): Promise<string> {
+async function writeFixtureGraph(factCount = 1): Promise<string> {
   const dir = join(tmpdir(), `adversary-repo-graph-${Date.now()}-${Math.random()}`);
   await mkdir(dir, { recursive: true });
   await writeFile(
@@ -25,7 +25,7 @@ async function writeFixtureGraph(): Promise<string> {
       symbolCount: 2,
       edgeCount: 2,
       testLinkCount: 1,
-      factCount: 1,
+      factCount,
     })}\n`,
   );
   const db = new DatabaseSync(join(dir, "graph.sqlite"));
@@ -44,6 +44,30 @@ async function writeFixtureGraph(): Promise<string> {
     INSERT INTO test_links VALUES (1,1,1,2,2,0.9,'filename');
     INSERT INTO semantic_facts VALUES (1,1,1,'go.fallible_once_initialization',2,1,3,1,1.0,'go/types','{"function":"serve","guard":"once","value":"cached","error":"cachedErr","explicitResetAfterError":false}');
   `);
+  const insertFact = db.prepare(
+    "INSERT INTO semantic_facts VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+  );
+  for (let id = 2; id <= factCount; id += 1) {
+    insertFact.run(
+      id,
+      1,
+      1,
+      "go.fallible_once_initialization",
+      id + 1,
+      1,
+      id + 2,
+      1,
+      1.0,
+      "go/types",
+      JSON.stringify({
+        function: `serve${id}`,
+        guard: `once${id}`,
+        value: `cached${id}`,
+        error: `cachedErr${id}`,
+        explicitResetAfterError: false,
+      }),
+    );
+  }
   db.close();
   return dir;
 }
@@ -64,6 +88,16 @@ describe("repo graph", () => {
       guard: "once",
       explicitResetAfterError: false,
     });
+    expect(graph.goFallibleOnceInitializations().items[0]?.key).toMatch(
+      /^go\.fallible_once_initialization:sha256:[a-f0-9]{64}$/,
+    );
+    graph.close();
+  });
+
+  it("collects every typed fact across bounded graph pages", async () => {
+    const graph = await openRepoGraph(await writeFixtureGraph(501));
+    expect(graph.allGoFallibleOnceInitializations()).toHaveLength(501);
+    expect(new Set(graph.allGoFallibleOnceInitializations().map((fact) => fact.key)).size).toBe(501);
     graph.close();
   });
 

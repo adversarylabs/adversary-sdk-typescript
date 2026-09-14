@@ -242,12 +242,12 @@ app.rule("scoped", async (ctx) => {
 The CLI can provide a cached, package-aware semantic repository graph. Rules should prefer its typed facts over rebuilding parsers and lexical scope resolution inside each adversary.
 
 ```ts
-const changed = new Set(ctx.change?.changedFiles ?? []);
-for (const fact of ctx.repoGraph?.goFallibleOnceInitializations().items ?? []) {
-  if (fact.explicitResetAfterError || (changed.size > 0 && !changed.has(fact.path))) continue;
+const inScope = new Set(await ctx.listInScopePaths({ include: (path) => path.endsWith(".go") }));
+for (const fact of ctx.repoGraph?.allGoFallibleOnceInitializations() ?? []) {
+  if (fact.explicitResetAfterError || !inScope.has(fact.path)) continue;
   ctx.finding({
     ruleId: "reliability.sync-once-fallible-init",
-    groupKey: `reliability.sync-once-fallible-init:${fact.path}:${fact.line}`,
+    groupKey: `reliability.sync-once-fallible-init:${fact.key}`,
     title: "sync.Once permanently caches initialization failure",
     summary: "A fallible dependency initialization is cached without a retry path.",
     evidence: [{ location: { file: fact.path, line: fact.line } }],
@@ -255,7 +255,7 @@ for (const fact of ctx.repoGraph?.goFallibleOnceInitializations().items ?? []) {
 }
 ```
 
-`semanticFacts(...)` is the bounded generic query surface. Typed helpers such as `goFallibleOnceInitializations(...)` validate fact payloads and should be preferred when available. Parsing, package grouping, symbol identity, and lexical shadowing remain CLI responsibilities; policy, severity, exceptions, and finding language remain adversary responsibilities.
+`semanticFacts(...)` and `goFallibleOnceInitializations(...)` are bounded paginated query surfaces. Complete rules should prefer typed collection helpers such as `allGoFallibleOnceInitializations()`, which validate payloads, traverse every page, and supply a stable semantic `key`. Parsing, package grouping, symbol identity, and lexical shadowing remain CLI responsibilities; policy, severity, exceptions, and finding language remain adversary responsibilities.
 
 ### Opinion framing (`formatOpinion` / `formatOpinionAsync`)
 
