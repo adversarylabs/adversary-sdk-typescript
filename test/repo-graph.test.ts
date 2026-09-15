@@ -208,6 +208,23 @@ describe("repo graph", () => {
     ).toThrow(/cannot be after its own direct source call/);
   });
 
+  it("rejects ambiguous selector call identities", () => {
+    expect(() =>
+      defineSemanticQuery({
+        language: "go",
+        within: "function",
+        steps: [{ kind: "call", name: "Do", receiverType: "sync.Once" }],
+      }),
+    ).toThrow(/with receiverType must identify the selector with method/);
+    expect(() =>
+      defineSemanticQuery({
+        language: "go",
+        within: "function",
+        steps: [{ kind: "call", name: "Do", method: "Do" }],
+      }),
+    ).toThrow(/either name for a function call or method for a selector call/);
+  });
+
   it("rejects contradictory containment relationships", () => {
     expect(() =>
       defineSemanticQuery({

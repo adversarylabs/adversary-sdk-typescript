@@ -210,6 +210,16 @@ export function defineSemanticQuery<T extends SemanticQuery>(query: T): T {
 
   for (const [index, step] of query.steps.entries()) {
     const label = `steps[${index}]`;
+    if (step.kind === "call" && step.name && step.method) {
+      throw new SemanticQueryValidationError(
+        `${label} must use either name for a function call or method for a selector call, not both`,
+      );
+    }
+    if (step.kind === "call" && step.name && step.receiverType) {
+      throw new SemanticQueryValidationError(
+        `${label} with receiverType must identify the selector with method, not name`,
+      );
+    }
     if (step.within) requireCapture(step.within, `${label}.within`, "operation", "call");
     if (step.outside) {
       requireCapture(step.outside, `${label}.outside`, "operation", "call");
