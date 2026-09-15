@@ -216,6 +216,11 @@ export function defineSemanticQuery<T extends SemanticQuery>(query: T): T {
         );
       }
       requireCapture(step.source, `${label}.source`, "operation", "call");
+      if (step.after === step.source) {
+        throw new SemanticQueryValidationError(
+          `${label} cannot be after its own direct source call`,
+        );
+      }
     }
     if (step.references) requireCapture(step.references, `${label}.references`, "binding");
     addCapture(step.capture, "operation", step.kind);

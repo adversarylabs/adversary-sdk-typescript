@@ -263,7 +263,9 @@ const matches = ctx.repoGraph?.semanticMatches(query) ?? [];
 Each result contains a stable `key`, source location, enclosing semantic unit, and captured
 operations or bindings. `defineSemanticQuery` rejects unknown, duplicate, or type-incompatible
 capture references when the adversary loads, so malformed query contracts cannot silently match
-nothing. Rules remain responsible for policy, severity, and finding language.
+nothing. An assignment linked with `source` must not also be `after` that source: the direct RHS
+call is nested inside the assignment and therefore starts later in source order. Rules remain
+responsible for policy, severity, and finding language.
 
 ### Opinion framing (`formatOpinion` / `formatOpinionAsync`)
 
