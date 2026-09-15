@@ -5,7 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 
 export const ADVERSARY_REPO_GRAPH_ENV = "ADVERSARY_REPO_GRAPH";
 export const REPO_GRAPH_SCHEMA_VERSION = "v2";
-export const REPO_GRAPH_ADAPTER_REVISION = "go-semantic-operations-v1+ts-syntax-v1";
+export const REPO_GRAPH_ADAPTER_REVISION = "go-semantic-operations-v2+ts-syntax-v1";
 
 export interface RepoGraphMeta {
   schemaVersion: string;

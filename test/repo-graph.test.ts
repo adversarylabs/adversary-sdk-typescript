@@ -16,7 +16,7 @@ async function writeFixtureGraph(): Promise<string> {
     join(dir, "meta.json"),
     `${JSON.stringify({
       schemaVersion: "v2",
-      adapterRevision: "go-semantic-operations-v1+ts-syntax-v1",
+      adapterRevision: "go-semantic-operations-v2+ts-syntax-v1",
       fingerprint: "fixture",
       repoPath: "/fixture",
       builtAt: new Date(0).toISOString(),
