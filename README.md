@@ -237,6 +237,30 @@ app.rule("scoped", async (ctx) => {
 });
 ```
 
+### `ctx.repoGraph.semanticMatches(query)`
+
+Use semantic matches for deterministic language rules that need type, scope, containment, or
+operation-order information. The CLI parses and resolves code once; adversaries provide a
+declarative sequence instead of implementing a source scanner.
+
+```ts
+const matches = ctx.repoGraph?.semanticMatches({
+  language: "go",
+  within: "function",
+  steps: [
+    { kind: "call", capture: "guard", method: "Do", receiverType: "sync.Once" },
+    { kind: "assignment", within: "guard", operator: "=", sourceKind: "call", targets: [
+      { scope: "package" },
+      { capture: "failure", scope: "package", type: "error" },
+    ] },
+    { kind: "return", after: "guard", references: "failure" },
+  ],
+}) ?? [];
+```
+
+Each result contains a stable `key`, source location, enclosing semantic unit, and captured
+operations or bindings. Rules remain responsible for policy, severity, and finding language.
+
 ### Opinion framing (`formatOpinion` / `formatOpinionAsync`)
 
 Do not hardcode "before merging" (or similar decision language) in domain adversaries.

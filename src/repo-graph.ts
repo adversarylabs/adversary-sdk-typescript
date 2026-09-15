@@ -1,10 +1,11 @@
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 export const ADVERSARY_REPO_GRAPH_ENV = "ADVERSARY_REPO_GRAPH";
 export const REPO_GRAPH_SCHEMA_VERSION = "v2";
-export const REPO_GRAPH_ADAPTER_REVISION = "go-ast-v1+ts-syntax-v1";
+export const REPO_GRAPH_ADAPTER_REVISION = "go-semantic-operations-v1+ts-syntax-v1";
 
 export interface RepoGraphMeta {
   schemaVersion: string;
@@ -17,6 +18,7 @@ export interface RepoGraphMeta {
   symbolCount: number;
   edgeCount: number;
   testLinkCount: number;
+  semanticUnitCount: number;
   parseFailures?: readonly RepoGraphDiagnostic[];
 }
 
@@ -73,6 +75,83 @@ export interface RepoGraphTestLink {
   reason: string;
 }
 
+export type SemanticBindingScope = "package" | "parameter" | "local" | "field" | "unknown";
+
+export interface SemanticBinding {
+  id: string;
+  name: string;
+  type?: string;
+  scope: SemanticBindingScope;
+}
+
+export interface SemanticOperation {
+  id: number;
+  kind: "call" | "assignment" | "return" | "condition";
+  line: number;
+  column: number;
+  endLine: number;
+  endColumn: number;
+  ancestors: readonly number[];
+  name?: string;
+  method?: string;
+  receiverType?: string;
+  receiverBinding?: string;
+  operator?: string;
+  sourceKind?: "call" | "expression";
+  targets?: readonly string[];
+  references?: readonly string[];
+}
+
+export interface SemanticUnit {
+  id: number;
+  key: string;
+  path: string;
+  language: string;
+  kind: "function";
+  name: string;
+  line: number;
+  column: number;
+  endLine: number;
+  endColumn: number;
+  bindings: readonly SemanticBinding[];
+  operations: readonly SemanticOperation[];
+}
+
+export interface SemanticTargetPattern {
+  capture?: string;
+  scope?: SemanticBindingScope;
+  type?: string;
+}
+
+export interface SemanticOperationPattern {
+  kind: SemanticOperation["kind"];
+  capture?: string;
+  within?: string;
+  after?: string;
+  name?: string;
+  method?: string;
+  receiverType?: string;
+  operator?: string;
+  sourceKind?: SemanticOperation["sourceKind"];
+  targets?: readonly SemanticTargetPattern[];
+  references?: string;
+}
+
+export interface SemanticQuery {
+  language: string;
+  within: "function";
+  steps: readonly SemanticOperationPattern[];
+}
+
+export interface SemanticMatch {
+  key: string;
+  path: string;
+  unit: SemanticUnit;
+  line: number;
+  column: number;
+  captures: Readonly<Record<string, SemanticOperation | SemanticBinding>>;
+}
+
 export interface RepoGraphPage<T> {
   items: readonly T[];
   nextCursor?: string;
@@ -118,6 +197,8 @@ export interface RepoGraph {
     cursor?: string;
     limit?: number;
   }): RepoGraphPage<RepoGraphTestLink>;
+  semanticUnits(options?: { language?: string; path?: string }): readonly SemanticUnit[];
+  semanticMatches(query: SemanticQuery): readonly SemanticMatch[];
   close(): void;
 }
 
@@ -268,6 +349,29 @@ class SQLiteRepoGraph implements RepoGraph {
     return testLinkPage(rows.map(testLinkRow), limit);
   }
 
+  semanticUnits(options: { language?: string; path?: string } = {}): readonly SemanticUnit[] {
+    if (options.path !== undefined) validPath(options.path);
+    const rows = this.database
+      .prepare(`SELECT su.id,f.path,su.language,su.kind,su.name,
+      su.line,su.column,su.end_line,su.end_column,su.data
+      FROM semantic_units su JOIN files f ON f.id=su.file_id
+      WHERE (?='' OR su.language=?) AND (?='' OR f.path=?) ORDER BY su.id`)
+      .all(
+        options.language ?? "",
+        options.language ?? "",
+        options.path ?? "",
+        normalizePath(options.path ?? ""),
+      );
+    return rows.map(semanticUnitRow);
+  }
+
+  semanticMatches(query: SemanticQuery): readonly SemanticMatch[] {
+    if (query.within !== "function" || query.steps.length === 0) return [];
+    return this.semanticUnits({ language: query.language }).flatMap((unit) =>
+      matchUnit(unit, query),
+    );
+  }
+
   close(): void {
     this.database.close();
   }
@@ -364,6 +468,122 @@ function edgeRow(row: RowRecord): RepoGraphEdge {
     confidence: number(row.confidence),
     adapter: text(row.adapter),
   };
+}
+
+interface SemanticUnitData {
+  key: string;
+  bindings: SemanticBinding[];
+  operations: SemanticOperation[];
+}
+
+function semanticUnitRow(row: RowRecord): SemanticUnit {
+  const data = JSON.parse(text(row.data)) as SemanticUnitData;
+  return {
+    id: number(row.id),
+    key: data.key,
+    path: text(row.path),
+    language: text(row.language),
+    kind: "function",
+    name: text(row.name),
+    line: number(row.line),
+    column: number(row.column),
+    endLine: number(row.end_line),
+    endColumn: number(row.end_column),
+    bindings: data.bindings,
+    operations: data.operations,
+  };
+}
+
+function matchUnit(unit: SemanticUnit, query: SemanticQuery): SemanticMatch[] {
+  const bindings = new Map(unit.bindings.map((binding) => [binding.id, binding]));
+  const results: SemanticMatch[] = [];
+  const resultKeys = new Set<string>();
+  const visit = (
+    stepIndex: number,
+    captures: Record<string, SemanticOperation | SemanticBinding>,
+  ): void => {
+    if (stepIndex === query.steps.length) {
+      const first = Object.values(captures).find(
+        (value): value is SemanticOperation => "kind" in value,
+      );
+      const identity = JSON.stringify([
+        unit.key,
+        ...Object.entries(captures).map(([key, value]) => [key, value.id]),
+      ]);
+      const key = `semantic-match:sha256:${createHash("sha256").update(identity).digest("hex")}`;
+      if (resultKeys.has(key)) return;
+      resultKeys.add(key);
+      results.push({
+        key,
+        path: unit.path,
+        unit,
+        line: first?.line ?? unit.line,
+        column: first?.column ?? unit.column,
+        captures: { ...captures },
+      });
+      return;
+    }
+    const pattern = query.steps[stepIndex] as SemanticOperationPattern;
+    for (const operation of unit.operations) {
+      if (!operationMatches(operation, pattern, captures, bindings)) continue;
+      const next = { ...captures };
+      if (pattern.capture) next[pattern.capture] = operation;
+      if (pattern.targets) {
+        for (let index = 0; index < pattern.targets.length; index++) {
+          const capture = pattern.targets[index]?.capture;
+          const binding = bindings.get(operation.targets?.[index] ?? "");
+          if (capture && binding) next[capture] = binding;
+        }
+      }
+      visit(stepIndex + 1, next);
+    }
+  };
+  visit(0, {});
+  return results;
+}
+
+function operationMatches(
+  operation: SemanticOperation,
+  pattern: SemanticOperationPattern,
+  captures: Record<string, SemanticOperation | SemanticBinding>,
+  bindings: Map<string, SemanticBinding>,
+): boolean {
+  if (
+    operation.kind !== pattern.kind ||
+    (pattern.name && operation.name !== pattern.name) ||
+    (pattern.method && operation.method !== pattern.method) ||
+    (pattern.receiverType && operation.receiverType !== pattern.receiverType) ||
+    (pattern.operator && operation.operator !== pattern.operator) ||
+    (pattern.sourceKind && operation.sourceKind !== pattern.sourceKind)
+  )
+    return false;
+  if (pattern.within) {
+    const parent = captures[pattern.within];
+    if (!parent || !("kind" in parent) || !operation.ancestors.includes(parent.id)) return false;
+  }
+  if (pattern.after) {
+    const previous = captures[pattern.after];
+    if (!previous || !("kind" in previous) || operation.id <= previous.id) return false;
+  }
+  if (pattern.targets) {
+    if (!operation.targets || operation.targets.length !== pattern.targets.length) return false;
+    for (let index = 0; index < pattern.targets.length; index++) {
+      const target = pattern.targets[index] as SemanticTargetPattern;
+      const binding = bindings.get(operation.targets[index] as string);
+      if (
+        !binding ||
+        (target.scope && binding.scope !== target.scope) ||
+        (target.type && binding.type !== target.type)
+      )
+        return false;
+    }
+  }
+  if (pattern.references) {
+    const captured = captures[pattern.references];
+    if (!captured || "kind" in captured || !operation.references?.includes(captured.id))
+      return false;
+  }
+  return true;
 }
 
 interface TestLinkWithID extends RepoGraphTestLink {

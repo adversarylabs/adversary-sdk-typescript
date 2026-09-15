@@ -96,6 +96,14 @@ export {
   type RepoGraphSymbol,
   type RepoGraphSymbolQuery,
   type RepoGraphTestLink,
+  type SemanticBinding,
+  type SemanticBindingScope,
+  type SemanticMatch,
+  type SemanticOperation,
+  type SemanticOperationPattern,
+  type SemanticQuery,
+  type SemanticTargetPattern,
+  type SemanticUnit,
 } from "./repo-graph.js";
 
 export {
