@@ -84,7 +84,9 @@ export {
   REPO_GRAPH_SCHEMA_VERSION,
   openRepoGraph,
   repoGraphFromEnvironment,
+  defineSemanticQuery,
   RepoGraphUnavailableError,
+  SemanticQueryValidationError,
   type RepoGraph,
   type RepoGraphDiagnostic,
   type RepoGraphEdge,
@@ -96,6 +98,14 @@ export {
   type RepoGraphSymbol,
   type RepoGraphSymbolQuery,
   type RepoGraphTestLink,
+  type SemanticBinding,
+  type SemanticBindingScope,
+  type SemanticMatch,
+  type SemanticOperation,
+  type SemanticOperationPattern,
+  type SemanticQuery,
+  type SemanticTargetPattern,
+  type SemanticUnit,
 } from "./repo-graph.js";
 
 export {

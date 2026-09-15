@@ -5,6 +5,8 @@ import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import {
   ADVERSARY_REPO_GRAPH_ENV,
+  SemanticQueryValidationError,
+  defineSemanticQuery,
   openRepoGraph,
   repoGraphFromEnvironment,
 } from "../src/repo-graph.js";
@@ -16,7 +18,7 @@ async function writeFixtureGraph(): Promise<string> {
     join(dir, "meta.json"),
     `${JSON.stringify({
       schemaVersion: "v2",
-      adapterRevision: "go-ast-v1+ts-syntax-v1",
+      adapterRevision: "go-semantic-operations-v3+ts-syntax-v1",
       fingerprint: "fixture",
       repoPath: "/fixture",
       builtAt: new Date(0).toISOString(),
@@ -25,6 +27,7 @@ async function writeFixtureGraph(): Promise<string> {
       symbolCount: 2,
       edgeCount: 2,
       testLinkCount: 1,
+      semanticUnitCount: 1,
     })}\n`,
   );
   const db = new DatabaseSync(join(dir, "graph.sqlite"));
@@ -33,6 +36,7 @@ async function writeFixtureGraph(): Promise<string> {
     CREATE TABLE symbols (id INTEGER PRIMARY KEY,file_id INTEGER,name TEXT,kind TEXT,start_line INTEGER,start_col INTEGER,end_line INTEGER,end_col INTEGER,container_id INTEGER,exported INTEGER,adapter_data TEXT);
     CREATE TABLE edges (id INTEGER PRIMARY KEY,from_file_id INTEGER,from_symbol_id INTEGER,to_file_id INTEGER,to_symbol_id INTEGER,unresolved_target TEXT,kind TEXT,line INTEGER,column INTEGER,confidence REAL,adapter TEXT);
     CREATE TABLE test_links (id INTEGER PRIMARY KEY,source_file_id INTEGER,source_symbol_id INTEGER,test_file_id INTEGER,test_symbol_id INTEGER,confidence REAL,reason TEXT);
+    CREATE TABLE semantic_units (id INTEGER PRIMARY KEY,file_id INTEGER,symbol_id INTEGER,language TEXT,kind TEXT,name TEXT,line INTEGER,column INTEGER,end_line INTEGER,end_column INTEGER,adapter TEXT,data TEXT);
     INSERT INTO files VALUES (1,'src/service.ts','typescript',10,'a','src/service.ts');
     INSERT INTO files VALUES (2,'src/service.test.ts','typescript',10,'b','src/service.test.ts');
     INSERT INTO symbols VALUES (1,1,'serve','function',1,0,4,1,NULL,1,'');
@@ -40,6 +44,7 @@ async function writeFixtureGraph(): Promise<string> {
     INSERT INTO edges VALUES (1,2,2,1,1,NULL,'calls',2,1,1.0,'fixture');
     INSERT INTO edges VALUES (2,2,NULL,1,NULL,NULL,'imports',1,1,1.0,'fixture');
     INSERT INTO test_links VALUES (1,1,1,2,2,0.9,'filename');
+    INSERT INTO semantic_units VALUES (1,1,1,'go','function','load',1,1,8,2,'fixture','{"key":"go:function:load","bindings":[{"id":"once","name":"once","type":"sync.Once","scope":"package"},{"id":"value","name":"value","type":"Store","scope":"package"},{"id":"failure","name":"failure","type":"ConcreteFailure","traits":["error"],"scope":"package"}],"operations":[{"id":1,"kind":"call","line":2,"column":2,"endLine":4,"endColumn":3,"ancestors":[],"method":"Do","receiverType":"sync.Once","receiverBinding":"once"},{"id":2,"kind":"assignment","line":3,"column":4,"endLine":3,"endColumn":30,"ancestors":[1],"operator":"=","sourceKind":"call","sourceOperation":3,"targets":["value","failure"]},{"id":3,"kind":"call","line":3,"column":21,"endLine":3,"endColumn":30,"ancestors":[1],"name":"construct"},{"id":4,"kind":"return","line":6,"column":2,"endLine":6,"endColumn":20,"ancestors":[],"references":["value","failure"]},{"id":5,"kind":"return","line":7,"column":2,"endLine":7,"endColumn":20,"ancestors":[],"references":["value","failure"]},{"id":6,"kind":"return","line":3,"column":5,"endLine":3,"endColumn":20,"ancestors":[1],"references":["value","failure"]}]}');
   `);
   db.close();
   return dir;
@@ -54,6 +59,226 @@ describe("repo graph", () => {
     expect(graph.importersOf("src/service.ts").items[0]?.fromPath).toBe("src/service.test.ts");
     expect(graph.relatedTests({ symbolId: 1 }).items[0]?.testPath).toBe("src/service.test.ts");
     graph.close();
+  });
+
+  it("matches typed operations through declarative captures", async () => {
+    const graph = await openRepoGraph(await writeFixtureGraph());
+    const matches = graph.semanticMatches({
+      language: "go",
+      within: "function",
+      steps: [
+        { kind: "call", capture: "guard", method: "Do", receiverType: "sync.Once" },
+        { kind: "call", capture: "constructor", name: "construct", within: "guard" },
+        {
+          kind: "assignment",
+          within: "guard",
+          source: "constructor",
+          operator: "=",
+          sourceKind: "call",
+          targets: [
+            { capture: "value", scope: "package" },
+            { capture: "failure", scope: "package", trait: "error" },
+          ],
+        },
+        {
+          kind: "return",
+          after: "guard",
+          outside: "guard",
+          references: ["value", "failure"],
+        },
+      ],
+    });
+    expect(matches).toHaveLength(1);
+    expect(matches[0]?.key).toMatch(/^semantic-match:sha256:/);
+    expect(matches[0]?.captures.failure).toMatchObject({
+      name: "failure",
+      type: "ConcreteFailure",
+      traits: ["error"],
+    });
+    graph.close();
+  });
+
+  it("normalizes nullable adapter arrays at the graph boundary", async () => {
+    const dir = await writeFixtureGraph();
+    const database = new DatabaseSync(join(dir, "graph.sqlite"));
+    database
+      .prepare(
+        "UPDATE semantic_units SET data=replace(data, '\"ancestors\":[]', '\"ancestors\":null')",
+      )
+      .run();
+    database.close();
+    const graph = await openRepoGraph(dir);
+    expect(
+      graph.semanticMatches({
+        language: "go",
+        within: "function",
+        steps: [
+          { kind: "call", capture: "guard", method: "Do", receiverType: "sync.Once" },
+          { kind: "return", after: "guard", outside: "guard" },
+        ],
+      }),
+    ).toHaveLength(1);
+    graph.close();
+  });
+
+  it("rejects an assignment sourced by a different call", async () => {
+    const graph = await openRepoGraph(await writeFixtureGraph());
+    expect(
+      graph.semanticMatches({
+        language: "go",
+        within: "function",
+        steps: [
+          { kind: "call", capture: "other", method: "Do", receiverType: "sync.Once" },
+          { kind: "assignment", source: "other", sourceKind: "call" },
+        ],
+      }),
+    ).toHaveLength(0);
+    graph.close();
+  });
+
+  it("excludes operations nested inside a captured call", async () => {
+    const graph = await openRepoGraph(await writeFixtureGraph());
+    const commonSteps = [
+      { kind: "call" as const, capture: "guard", method: "Do", receiverType: "sync.Once" },
+      {
+        kind: "assignment" as const,
+        within: "guard",
+        targets: [{ capture: "value" }, { capture: "failure" }],
+      },
+    ];
+    const allLater = graph.semanticMatches({
+      language: "go",
+      within: "function",
+      steps: [
+        ...commonSteps,
+        {
+          kind: "return",
+          capture: "observed",
+          after: "guard",
+          references: ["value", "failure"],
+        },
+      ],
+    });
+    const outsideLater = graph.semanticMatches({
+      language: "go",
+      within: "function",
+      steps: [
+        ...commonSteps,
+        {
+          kind: "return",
+          capture: "observed",
+          after: "guard",
+          outside: "guard",
+          references: ["value", "failure"],
+        },
+      ],
+    });
+    expect(allLater).toHaveLength(3);
+    expect(outsideLater).toHaveLength(2);
+    graph.close();
+  });
+
+  it("rejects unknown and incompatible relationship captures", () => {
+    expect(() =>
+      defineSemanticQuery({
+        language: "go",
+        within: "function",
+        steps: [{ kind: "assignment", within: "missing" }],
+      }),
+    ).toThrow(SemanticQueryValidationError);
+    expect(() =>
+      defineSemanticQuery({
+        language: "go",
+        within: "function",
+        steps: [
+          { kind: "assignment", targets: [{ capture: "failure", type: "error" }] },
+          { kind: "return", after: "failure" },
+        ],
+      }),
+    ).toThrow(/incompatible binding capture/);
+  });
+
+  it("rejects duplicate captures and invalid assignment sources", () => {
+    expect(() =>
+      defineSemanticQuery({
+        language: "go",
+        within: "function",
+        steps: [
+          { kind: "call", capture: "operation", name: "first" },
+          { kind: "call", capture: "operation", name: "second" },
+        ],
+      }),
+    ).toThrow(/declared more than once/);
+    expect(() =>
+      defineSemanticQuery({
+        language: "go",
+        within: "function",
+        steps: [
+          { kind: "call", capture: "constructor", name: "connect" },
+          { kind: "assignment", source: "constructor", sourceKind: "expression" },
+        ],
+      }),
+    ).toThrow(/sourceKind "call"/);
+    expect(() =>
+      defineSemanticQuery({
+        language: "go",
+        within: "function",
+        steps: [
+          { kind: "call", capture: "factory" },
+          { kind: "assignment", source: "factory", sourceKind: "call", after: "factory" },
+        ],
+      }),
+    ).toThrow(/cannot be after its own direct source call/);
+  });
+
+  it("rejects ambiguous selector call identities", () => {
+    expect(() =>
+      defineSemanticQuery({
+        language: "go",
+        within: "function",
+        steps: [{ kind: "call", name: "Do", receiverType: "sync.Once" }],
+      }),
+    ).toThrow(/with receiverType must identify the selector with method/);
+    expect(() =>
+      defineSemanticQuery({
+        language: "go",
+        within: "function",
+        steps: [{ kind: "call", name: "Do", method: "Do" }],
+      }),
+    ).toThrow(/either name for a function call or method for a selector call/);
+  });
+
+  it("rejects contradictory containment relationships", () => {
+    expect(() =>
+      defineSemanticQuery({
+        language: "go",
+        within: "function",
+        steps: [
+          { kind: "call", capture: "guard" },
+          { kind: "return", within: "guard", outside: "guard" },
+        ],
+      }),
+    ).toThrow(/both within and outside/);
+  });
+
+  it("rejects invalid multi-binding references", () => {
+    expect(() =>
+      defineSemanticQuery({
+        language: "go",
+        within: "function",
+        steps: [{ kind: "return", references: [] }],
+      }),
+    ).toThrow(/references must not be empty/);
+    expect(() =>
+      defineSemanticQuery({
+        language: "go",
+        within: "function",
+        steps: [
+          { kind: "assignment", targets: [{ capture: "value" }] },
+          { kind: "return", references: ["value", "missing"] },
+        ],
+      }),
+    ).toThrow(/unknown earlier capture "missing"/);
   });
 
   it("loads from the environment and degrades safely", async () => {

@@ -237,6 +237,43 @@ app.rule("scoped", async (ctx) => {
 });
 ```
 
+### `ctx.repoGraph.semanticMatches(query)`
+
+Use semantic matches for deterministic language rules that need type, scope, containment, or
+operation-order information. The CLI parses and resolves code once; adversaries provide a
+declarative sequence instead of implementing a source scanner.
+
+```ts
+const query = defineSemanticQuery({
+  language: "go",
+  within: "function",
+  steps: [
+    { kind: "call", capture: "guard", method: "Do", receiverType: "sync.Once" },
+    { kind: "call", capture: "constructor", name: "connect", within: "guard" },
+    { kind: "assignment", within: "guard", source: "constructor", operator: "=", sourceKind: "call", targets: [
+      { capture: "value", scope: "package" },
+      { capture: "failure", scope: "package", trait: "error" },
+    ] },
+    { kind: "return", after: "guard", outside: "guard", references: ["value", "failure"] },
+  ],
+});
+const matches = ctx.repoGraph?.semanticMatches(query) ?? [];
+```
+
+Each result contains a stable `key`, source location, enclosing semantic unit, and captured
+operations or bindings. `defineSemanticQuery` rejects unknown, duplicate, or type-incompatible
+capture references when the adversary loads, so malformed query contracts cannot silently match
+nothing. An assignment linked with `source` must not also be `after` that source: the direct RHS
+call is nested inside the assignment and therefore starts later in source order. Rules remain
+responsible for policy, severity, and finding language. `references` accepts one capture name or
+an array when the same operation must reference every captured binding.
+Use `outside` with an earlier captured call to require that an operation is not lexically nested
+inside that call. Combined with `after`, this distinguishes an enclosing-function return after a
+callback-bearing guard from a return inside the callback itself.
+Binding `trait` constraints are adapter-neutral semantic categories. For example, a language
+adapter may mark both an interface-typed failure and a concrete failure implementation with the
+`error` trait, avoiding brittle exact type-name checks in adversaries.
+
 ### Opinion framing (`formatOpinion` / `formatOpinionAsync`)
 
 Do not hardcode "before merging" (or similar decision language) in domain adversaries.

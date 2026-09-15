@@ -1,10 +1,11 @@
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 export const ADVERSARY_REPO_GRAPH_ENV = "ADVERSARY_REPO_GRAPH";
 export const REPO_GRAPH_SCHEMA_VERSION = "v2";
-export const REPO_GRAPH_ADAPTER_REVISION = "go-ast-v1+ts-syntax-v1";
+export const REPO_GRAPH_ADAPTER_REVISION = "go-semantic-operations-v3+ts-syntax-v1";
 
 export interface RepoGraphMeta {
   schemaVersion: string;
@@ -17,6 +18,7 @@ export interface RepoGraphMeta {
   symbolCount: number;
   edgeCount: number;
   testLinkCount: number;
+  semanticUnitCount: number;
   parseFailures?: readonly RepoGraphDiagnostic[];
 }
 
@@ -73,6 +75,188 @@ export interface RepoGraphTestLink {
   reason: string;
 }
 
+export type SemanticBindingScope = "package" | "parameter" | "local" | "field" | "unknown";
+
+export interface SemanticBinding {
+  id: string;
+  name: string;
+  type?: string;
+  traits?: readonly string[];
+  scope: SemanticBindingScope;
+}
+
+export interface SemanticOperation {
+  id: number;
+  kind: "call" | "assignment" | "return" | "condition";
+  line: number;
+  column: number;
+  endLine: number;
+  endColumn: number;
+  ancestors: readonly number[];
+  name?: string;
+  method?: string;
+  receiverType?: string;
+  receiverBinding?: string;
+  operator?: string;
+  sourceKind?: "call" | "expression";
+  sourceOperation?: number;
+  targets?: readonly string[];
+  references?: readonly string[];
+}
+
+export interface SemanticUnit {
+  id: number;
+  key: string;
+  path: string;
+  language: string;
+  kind: "function";
+  name: string;
+  line: number;
+  column: number;
+  endLine: number;
+  endColumn: number;
+  bindings: readonly SemanticBinding[];
+  operations: readonly SemanticOperation[];
+}
+
+export interface SemanticTargetPattern {
+  capture?: string;
+  scope?: SemanticBindingScope;
+  type?: string;
+  trait?: string;
+}
+
+export interface SemanticOperationPattern {
+  kind: SemanticOperation["kind"];
+  capture?: string;
+  within?: string;
+  outside?: string;
+  after?: string;
+  name?: string;
+  method?: string;
+  receiverType?: string;
+  operator?: string;
+  sourceKind?: SemanticOperation["sourceKind"];
+  source?: string;
+  targets?: readonly SemanticTargetPattern[];
+  references?: string | readonly string[];
+}
+
+export interface SemanticQuery {
+  language: string;
+  within: "function";
+  steps: readonly SemanticOperationPattern[];
+}
+
+export interface SemanticMatch {
+  key: string;
+  path: string;
+  unit: SemanticUnit;
+  line: number;
+  column: number;
+  captures: Readonly<Record<string, SemanticOperation | SemanticBinding>>;
+}
+
+export class SemanticQueryValidationError extends Error {
+  constructor(message: string) {
+    super(`invalid semantic query: ${message}`);
+    this.name = "SemanticQueryValidationError";
+  }
+}
+
+export function defineSemanticQuery<T extends SemanticQuery>(query: T): T {
+  if (!query.language.trim()) throw new SemanticQueryValidationError("language is required");
+  if (query.within !== "function") {
+    throw new SemanticQueryValidationError('within must be "function"');
+  }
+  if (query.steps.length === 0)
+    throw new SemanticQueryValidationError("at least one step is required");
+
+  const captures = new Map<
+    string,
+    { type: "operation" | "binding"; kind?: SemanticOperation["kind"] }
+  >();
+  const requireCapture = (
+    name: string,
+    relationship: string,
+    type: "operation" | "binding",
+    kind?: SemanticOperation["kind"],
+  ): void => {
+    const captured = captures.get(name);
+    if (!captured) {
+      throw new SemanticQueryValidationError(
+        `${relationship} references unknown earlier capture ${JSON.stringify(name)}`,
+      );
+    }
+    if (captured.type !== type || (kind && captured.kind !== kind)) {
+      throw new SemanticQueryValidationError(
+        `${relationship} references an incompatible ${captured.type} capture ${JSON.stringify(name)}`,
+      );
+    }
+  };
+  const addCapture = (
+    name: string | undefined,
+    type: "operation" | "binding",
+    kind?: SemanticOperation["kind"],
+  ): void => {
+    if (!name) return;
+    if (captures.has(name)) {
+      throw new SemanticQueryValidationError(
+        `capture ${JSON.stringify(name)} is declared more than once`,
+      );
+    }
+    captures.set(name, { type, ...(kind ? { kind } : {}) });
+  };
+
+  for (const [index, step] of query.steps.entries()) {
+    const label = `steps[${index}]`;
+    if (step.kind === "call" && step.name && step.method) {
+      throw new SemanticQueryValidationError(
+        `${label} must use either name for a function call or method for a selector call, not both`,
+      );
+    }
+    if (step.kind === "call" && step.name && step.receiverType) {
+      throw new SemanticQueryValidationError(
+        `${label} with receiverType must identify the selector with method, not name`,
+      );
+    }
+    if (step.within) requireCapture(step.within, `${label}.within`, "operation", "call");
+    if (step.outside) {
+      requireCapture(step.outside, `${label}.outside`, "operation", "call");
+      if (step.outside === step.within) {
+        throw new SemanticQueryValidationError(
+          `${label} cannot be both within and outside the same operation`,
+        );
+      }
+    }
+    if (step.after) requireCapture(step.after, `${label}.after`, "operation");
+    if (step.source) {
+      if (step.kind !== "assignment" || step.sourceKind !== "call") {
+        throw new SemanticQueryValidationError(
+          `${label}.source requires an assignment with sourceKind "call"`,
+        );
+      }
+      requireCapture(step.source, `${label}.source`, "operation", "call");
+      if (step.after === step.source) {
+        throw new SemanticQueryValidationError(
+          `${label} cannot be after its own direct source call`,
+        );
+      }
+    }
+    const references =
+      typeof step.references === "string" ? [step.references] : (step.references ?? []);
+    if (references.length === 0 && Array.isArray(step.references)) {
+      throw new SemanticQueryValidationError(`${label}.references must not be empty`);
+    }
+    for (const reference of references) {
+      requireCapture(reference, `${label}.references`, "binding");
+    }
+    addCapture(step.capture, "operation", step.kind);
+    for (const target of step.targets ?? []) addCapture(target.capture, "binding");
+  }
+  return query;
+}
+
 export interface RepoGraphPage<T> {
   items: readonly T[];
   nextCursor?: string;
@@ -118,6 +302,8 @@ export interface RepoGraph {
     cursor?: string;
     limit?: number;
   }): RepoGraphPage<RepoGraphTestLink>;
+  semanticUnits(options?: { language?: string; path?: string }): readonly SemanticUnit[];
+  semanticMatches(query: SemanticQuery): readonly SemanticMatch[];
   close(): void;
 }
 
@@ -268,6 +454,29 @@ class SQLiteRepoGraph implements RepoGraph {
     return testLinkPage(rows.map(testLinkRow), limit);
   }
 
+  semanticUnits(options: { language?: string; path?: string } = {}): readonly SemanticUnit[] {
+    if (options.path !== undefined) validPath(options.path);
+    const rows = this.database
+      .prepare(`SELECT su.id,f.path,su.language,su.kind,su.name,
+      su.line,su.column,su.end_line,su.end_column,su.data
+      FROM semantic_units su JOIN files f ON f.id=su.file_id
+      WHERE (?='' OR su.language=?) AND (?='' OR f.path=?) ORDER BY su.id`)
+      .all(
+        options.language ?? "",
+        options.language ?? "",
+        options.path ?? "",
+        normalizePath(options.path ?? ""),
+      );
+    return rows.map(semanticUnitRow);
+  }
+
+  semanticMatches(query: SemanticQuery): readonly SemanticMatch[] {
+    defineSemanticQuery(query);
+    return this.semanticUnits({ language: query.language }).flatMap((unit) =>
+      matchUnit(unit, query),
+    );
+  }
+
   close(): void {
     this.database.close();
   }
@@ -364,6 +573,154 @@ function edgeRow(row: RowRecord): RepoGraphEdge {
     confidence: number(row.confidence),
     adapter: text(row.adapter),
   };
+}
+
+interface SemanticUnitData {
+  key: string;
+  bindings: Array<Omit<SemanticBinding, "traits"> & { traits?: string[] | null }>;
+  operations: Array<
+    Omit<SemanticOperation, "ancestors" | "targets" | "references"> & {
+      ancestors?: number[] | null;
+      targets?: string[] | null;
+      references?: string[] | null;
+    }
+  >;
+}
+
+function semanticUnitRow(row: RowRecord): SemanticUnit {
+  const data = JSON.parse(text(row.data)) as SemanticUnitData;
+  return {
+    id: number(row.id),
+    key: data.key,
+    path: text(row.path),
+    language: text(row.language),
+    kind: "function",
+    name: text(row.name),
+    line: number(row.line),
+    column: number(row.column),
+    endLine: number(row.end_line),
+    endColumn: number(row.end_column),
+    bindings: data.bindings.map(({ traits, ...binding }) => ({
+      ...binding,
+      ...(Array.isArray(traits) ? { traits } : {}),
+    })),
+    operations: data.operations.map(({ ancestors, targets, references, ...operation }) => ({
+      ...operation,
+      ancestors: Array.isArray(ancestors) ? ancestors : [],
+      ...(Array.isArray(targets) ? { targets } : {}),
+      ...(Array.isArray(references) ? { references } : {}),
+    })),
+  };
+}
+
+function matchUnit(unit: SemanticUnit, query: SemanticQuery): SemanticMatch[] {
+  const bindings = new Map(unit.bindings.map((binding) => [binding.id, binding]));
+  const results: SemanticMatch[] = [];
+  const resultKeys = new Set<string>();
+  const visit = (
+    stepIndex: number,
+    captures: Record<string, SemanticOperation | SemanticBinding>,
+  ): void => {
+    if (stepIndex === query.steps.length) {
+      const first = Object.values(captures).find(
+        (value): value is SemanticOperation => "kind" in value,
+      );
+      const identity = JSON.stringify([
+        unit.key,
+        ...Object.entries(captures).map(([key, value]) => [key, value.id]),
+      ]);
+      const key = `semantic-match:sha256:${createHash("sha256").update(identity).digest("hex")}`;
+      if (resultKeys.has(key)) return;
+      resultKeys.add(key);
+      results.push({
+        key,
+        path: unit.path,
+        unit,
+        line: first?.line ?? unit.line,
+        column: first?.column ?? unit.column,
+        captures: { ...captures },
+      });
+      return;
+    }
+    const pattern = query.steps[stepIndex] as SemanticOperationPattern;
+    for (const operation of unit.operations) {
+      if (!operationMatches(operation, pattern, captures, bindings)) continue;
+      const next = { ...captures };
+      if (pattern.capture) next[pattern.capture] = operation;
+      if (pattern.targets) {
+        for (let index = 0; index < pattern.targets.length; index++) {
+          const capture = pattern.targets[index]?.capture;
+          const binding = bindings.get(operation.targets?.[index] ?? "");
+          if (capture && binding) next[capture] = binding;
+        }
+      }
+      visit(stepIndex + 1, next);
+    }
+  };
+  visit(0, {});
+  return results;
+}
+
+function operationMatches(
+  operation: SemanticOperation,
+  pattern: SemanticOperationPattern,
+  captures: Record<string, SemanticOperation | SemanticBinding>,
+  bindings: Map<string, SemanticBinding>,
+): boolean {
+  if (
+    operation.kind !== pattern.kind ||
+    (pattern.name && operation.name !== pattern.name) ||
+    (pattern.method && operation.method !== pattern.method) ||
+    (pattern.receiverType && operation.receiverType !== pattern.receiverType) ||
+    (pattern.operator && operation.operator !== pattern.operator) ||
+    (pattern.sourceKind && operation.sourceKind !== pattern.sourceKind)
+  )
+    return false;
+  if (pattern.within) {
+    const parent = captures[pattern.within];
+    if (!parent || !("kind" in parent) || !operation.ancestors.includes(parent.id)) return false;
+  }
+  if (pattern.outside) {
+    const excludedParent = captures[pattern.outside];
+    if (
+      !excludedParent ||
+      !("kind" in excludedParent) ||
+      operation.ancestors.includes(excludedParent.id)
+    )
+      return false;
+  }
+  if (pattern.after) {
+    const previous = captures[pattern.after];
+    if (!previous || !("kind" in previous) || operation.id <= previous.id) return false;
+  }
+  if (pattern.source) {
+    const source = captures[pattern.source];
+    if (!source || !("kind" in source) || operation.sourceOperation !== source.id) return false;
+  }
+  if (pattern.targets) {
+    if (!operation.targets || operation.targets.length !== pattern.targets.length) return false;
+    for (let index = 0; index < pattern.targets.length; index++) {
+      const target = pattern.targets[index] as SemanticTargetPattern;
+      const binding = bindings.get(operation.targets[index] as string);
+      if (
+        !binding ||
+        (target.scope && binding.scope !== target.scope) ||
+        (target.type && binding.type !== target.type) ||
+        (target.trait && !binding.traits?.includes(target.trait))
+      )
+        return false;
+    }
+  }
+  if (pattern.references) {
+    const references =
+      typeof pattern.references === "string" ? [pattern.references] : pattern.references;
+    for (const reference of references) {
+      const captured = captures[reference];
+      if (!captured || "kind" in captured || !operation.references?.includes(captured.id))
+        return false;
+    }
+  }
+  return true;
 }
 
 interface TestLinkWithID extends RepoGraphTestLink {
