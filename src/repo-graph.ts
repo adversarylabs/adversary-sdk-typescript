@@ -98,6 +98,7 @@ export interface SemanticOperation {
   receiverBinding?: string;
   operator?: string;
   sourceKind?: "call" | "expression";
+  sourceOperation?: number;
   targets?: readonly string[];
   references?: readonly string[];
 }
@@ -133,6 +134,7 @@ export interface SemanticOperationPattern {
   receiverType?: string;
   operator?: string;
   sourceKind?: SemanticOperation["sourceKind"];
+  source?: string;
   targets?: readonly SemanticTargetPattern[];
   references?: string;
 }
@@ -564,6 +566,10 @@ function operationMatches(
   if (pattern.after) {
     const previous = captures[pattern.after];
     if (!previous || !("kind" in previous) || operation.id <= previous.id) return false;
+  }
+  if (pattern.source) {
+    const source = captures[pattern.source];
+    if (!source || !("kind" in source) || operation.sourceOperation !== source.id) return false;
   }
   if (pattern.targets) {
     if (!operation.targets || operation.targets.length !== pattern.targets.length) return false;

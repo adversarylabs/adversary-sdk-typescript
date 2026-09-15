@@ -249,7 +249,8 @@ const matches = ctx.repoGraph?.semanticMatches({
   within: "function",
   steps: [
     { kind: "call", capture: "guard", method: "Do", receiverType: "sync.Once" },
-    { kind: "assignment", within: "guard", operator: "=", sourceKind: "call", targets: [
+    { kind: "call", capture: "constructor", name: "connect", within: "guard" },
+    { kind: "assignment", within: "guard", source: "constructor", operator: "=", sourceKind: "call", targets: [
       { scope: "package" },
       { capture: "failure", scope: "package", type: "error" },
     ] },

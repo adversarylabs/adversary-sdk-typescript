@@ -42,7 +42,7 @@ async function writeFixtureGraph(): Promise<string> {
     INSERT INTO edges VALUES (1,2,2,1,1,NULL,'calls',2,1,1.0,'fixture');
     INSERT INTO edges VALUES (2,2,NULL,1,NULL,NULL,'imports',1,1,1.0,'fixture');
     INSERT INTO test_links VALUES (1,1,1,2,2,0.9,'filename');
-    INSERT INTO semantic_units VALUES (1,1,1,'go','function','load',1,1,8,2,'fixture','{"key":"go:function:load","bindings":[{"id":"once","name":"once","type":"sync.Once","scope":"package"},{"id":"value","name":"value","type":"Store","scope":"package"},{"id":"failure","name":"failure","type":"error","scope":"package"}],"operations":[{"id":1,"kind":"call","line":2,"column":2,"endLine":4,"endColumn":3,"ancestors":[],"method":"Do","receiverType":"sync.Once","receiverBinding":"once"},{"id":2,"kind":"assignment","line":3,"column":4,"endLine":3,"endColumn":30,"ancestors":[1],"operator":"=","sourceKind":"call","targets":["value","failure"]},{"id":3,"kind":"return","line":6,"column":2,"endLine":6,"endColumn":20,"ancestors":[],"references":["value","failure"]},{"id":4,"kind":"return","line":7,"column":2,"endLine":7,"endColumn":20,"ancestors":[],"references":["value","failure"]}]}');
+    INSERT INTO semantic_units VALUES (1,1,1,'go','function','load',1,1,8,2,'fixture','{"key":"go:function:load","bindings":[{"id":"once","name":"once","type":"sync.Once","scope":"package"},{"id":"value","name":"value","type":"Store","scope":"package"},{"id":"failure","name":"failure","type":"error","scope":"package"}],"operations":[{"id":1,"kind":"call","line":2,"column":2,"endLine":4,"endColumn":3,"ancestors":[],"method":"Do","receiverType":"sync.Once","receiverBinding":"once"},{"id":2,"kind":"call","line":3,"column":21,"endLine":3,"endColumn":30,"ancestors":[1],"name":"construct"},{"id":3,"kind":"assignment","line":3,"column":4,"endLine":3,"endColumn":30,"ancestors":[1],"operator":"=","sourceKind":"call","sourceOperation":2,"targets":["value","failure"]},{"id":4,"kind":"return","line":6,"column":2,"endLine":6,"endColumn":20,"ancestors":[],"references":["value","failure"]},{"id":5,"kind":"return","line":7,"column":2,"endLine":7,"endColumn":20,"ancestors":[],"references":["value","failure"]}]}');
   `);
   db.close();
   return dir;
@@ -66,9 +66,11 @@ describe("repo graph", () => {
       within: "function",
       steps: [
         { kind: "call", capture: "guard", method: "Do", receiverType: "sync.Once" },
+        { kind: "call", capture: "constructor", name: "construct", within: "guard" },
         {
           kind: "assignment",
           within: "guard",
+          source: "constructor",
           operator: "=",
           sourceKind: "call",
           targets: [{ scope: "package" }, { capture: "failure", scope: "package", type: "error" }],
@@ -79,6 +81,21 @@ describe("repo graph", () => {
     expect(matches).toHaveLength(1);
     expect(matches[0]?.key).toMatch(/^semantic-match:sha256:/);
     expect(matches[0]?.captures.failure).toMatchObject({ name: "failure", type: "error" });
+    graph.close();
+  });
+
+  it("rejects an assignment sourced by a different call", async () => {
+    const graph = await openRepoGraph(await writeFixtureGraph());
+    expect(
+      graph.semanticMatches({
+        language: "go",
+        within: "function",
+        steps: [
+          { kind: "call", capture: "other", method: "Do", receiverType: "sync.Once" },
+          { kind: "assignment", source: "other", sourceKind: "call" },
+        ],
+      }),
+    ).toHaveLength(0);
     graph.close();
   });
 
