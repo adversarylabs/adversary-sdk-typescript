@@ -154,6 +154,76 @@ export interface SemanticMatch {
   captures: Readonly<Record<string, SemanticOperation | SemanticBinding>>;
 }
 
+export class SemanticQueryValidationError extends Error {
+  constructor(message: string) {
+    super(`invalid semantic query: ${message}`);
+    this.name = "SemanticQueryValidationError";
+  }
+}
+
+export function defineSemanticQuery<T extends SemanticQuery>(query: T): T {
+  if (!query.language.trim()) throw new SemanticQueryValidationError("language is required");
+  if (query.within !== "function") {
+    throw new SemanticQueryValidationError('within must be "function"');
+  }
+  if (query.steps.length === 0)
+    throw new SemanticQueryValidationError("at least one step is required");
+
+  const captures = new Map<
+    string,
+    { type: "operation" | "binding"; kind?: SemanticOperation["kind"] }
+  >();
+  const requireCapture = (
+    name: string,
+    relationship: string,
+    type: "operation" | "binding",
+    kind?: SemanticOperation["kind"],
+  ): void => {
+    const captured = captures.get(name);
+    if (!captured) {
+      throw new SemanticQueryValidationError(
+        `${relationship} references unknown earlier capture ${JSON.stringify(name)}`,
+      );
+    }
+    if (captured.type !== type || (kind && captured.kind !== kind)) {
+      throw new SemanticQueryValidationError(
+        `${relationship} references an incompatible ${captured.type} capture ${JSON.stringify(name)}`,
+      );
+    }
+  };
+  const addCapture = (
+    name: string | undefined,
+    type: "operation" | "binding",
+    kind?: SemanticOperation["kind"],
+  ): void => {
+    if (!name) return;
+    if (captures.has(name)) {
+      throw new SemanticQueryValidationError(
+        `capture ${JSON.stringify(name)} is declared more than once`,
+      );
+    }
+    captures.set(name, { type, ...(kind ? { kind } : {}) });
+  };
+
+  for (const [index, step] of query.steps.entries()) {
+    const label = `steps[${index}]`;
+    if (step.within) requireCapture(step.within, `${label}.within`, "operation", "call");
+    if (step.after) requireCapture(step.after, `${label}.after`, "operation");
+    if (step.source) {
+      if (step.kind !== "assignment" || step.sourceKind !== "call") {
+        throw new SemanticQueryValidationError(
+          `${label}.source requires an assignment with sourceKind "call"`,
+        );
+      }
+      requireCapture(step.source, `${label}.source`, "operation", "call");
+    }
+    if (step.references) requireCapture(step.references, `${label}.references`, "binding");
+    addCapture(step.capture, "operation", step.kind);
+    for (const target of step.targets ?? []) addCapture(target.capture, "binding");
+  }
+  return query;
+}
+
 export interface RepoGraphPage<T> {
   items: readonly T[];
   nextCursor?: string;
@@ -368,7 +438,7 @@ class SQLiteRepoGraph implements RepoGraph {
   }
 
   semanticMatches(query: SemanticQuery): readonly SemanticMatch[] {
-    if (query.within !== "function" || query.steps.length === 0) return [];
+    defineSemanticQuery(query);
     return this.semanticUnits({ language: query.language }).flatMap((unit) =>
       matchUnit(unit, query),
     );

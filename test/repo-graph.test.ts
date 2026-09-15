@@ -5,6 +5,8 @@ import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import {
   ADVERSARY_REPO_GRAPH_ENV,
+  SemanticQueryValidationError,
+  defineSemanticQuery,
   openRepoGraph,
   repoGraphFromEnvironment,
 } from "../src/repo-graph.js";
@@ -97,6 +99,49 @@ describe("repo graph", () => {
       }),
     ).toHaveLength(0);
     graph.close();
+  });
+
+  it("rejects unknown and incompatible relationship captures", () => {
+    expect(() =>
+      defineSemanticQuery({
+        language: "go",
+        within: "function",
+        steps: [{ kind: "assignment", within: "missing" }],
+      }),
+    ).toThrow(SemanticQueryValidationError);
+    expect(() =>
+      defineSemanticQuery({
+        language: "go",
+        within: "function",
+        steps: [
+          { kind: "assignment", targets: [{ capture: "failure", type: "error" }] },
+          { kind: "return", after: "failure" },
+        ],
+      }),
+    ).toThrow(/incompatible binding capture/);
+  });
+
+  it("rejects duplicate captures and invalid assignment sources", () => {
+    expect(() =>
+      defineSemanticQuery({
+        language: "go",
+        within: "function",
+        steps: [
+          { kind: "call", capture: "operation", name: "first" },
+          { kind: "call", capture: "operation", name: "second" },
+        ],
+      }),
+    ).toThrow(/declared more than once/);
+    expect(() =>
+      defineSemanticQuery({
+        language: "go",
+        within: "function",
+        steps: [
+          { kind: "call", capture: "constructor", name: "connect" },
+          { kind: "assignment", source: "constructor", sourceKind: "expression" },
+        ],
+      }),
+    ).toThrow(/sourceKind "call"/);
   });
 
   it("loads from the environment and degrades safely", async () => {

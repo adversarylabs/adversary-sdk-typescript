@@ -244,7 +244,7 @@ operation-order information. The CLI parses and resolves code once; adversaries 
 declarative sequence instead of implementing a source scanner.
 
 ```ts
-const matches = ctx.repoGraph?.semanticMatches({
+const query = defineSemanticQuery({
   language: "go",
   within: "function",
   steps: [
@@ -256,11 +256,14 @@ const matches = ctx.repoGraph?.semanticMatches({
     ] },
     { kind: "return", after: "guard", references: "failure" },
   ],
-}) ?? [];
+});
+const matches = ctx.repoGraph?.semanticMatches(query) ?? [];
 ```
 
 Each result contains a stable `key`, source location, enclosing semantic unit, and captured
-operations or bindings. Rules remain responsible for policy, severity, and finding language.
+operations or bindings. `defineSemanticQuery` rejects unknown, duplicate, or type-incompatible
+capture references when the adversary loads, so malformed query contracts cannot silently match
+nothing. Rules remain responsible for policy, severity, and finding language.
 
 ### Opinion framing (`formatOpinion` / `formatOpinionAsync`)
 
