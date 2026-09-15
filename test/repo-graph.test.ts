@@ -44,7 +44,7 @@ async function writeFixtureGraph(): Promise<string> {
     INSERT INTO edges VALUES (1,2,2,1,1,NULL,'calls',2,1,1.0,'fixture');
     INSERT INTO edges VALUES (2,2,NULL,1,NULL,NULL,'imports',1,1,1.0,'fixture');
     INSERT INTO test_links VALUES (1,1,1,2,2,0.9,'filename');
-    INSERT INTO semantic_units VALUES (1,1,1,'go','function','load',1,1,8,2,'fixture','{"key":"go:function:load","bindings":[{"id":"once","name":"once","type":"sync.Once","scope":"package"},{"id":"value","name":"value","type":"Store","scope":"package"},{"id":"failure","name":"failure","type":"ConcreteFailure","traits":["error"],"scope":"package"}],"operations":[{"id":1,"kind":"call","line":2,"column":2,"endLine":4,"endColumn":3,"ancestors":[],"method":"Do","receiverType":"sync.Once","receiverBinding":"once"},{"id":2,"kind":"assignment","line":3,"column":4,"endLine":3,"endColumn":30,"ancestors":[1],"operator":"=","sourceKind":"call","sourceOperation":3,"targets":["value","failure"]},{"id":3,"kind":"call","line":3,"column":21,"endLine":3,"endColumn":30,"ancestors":[1],"name":"construct"},{"id":4,"kind":"return","line":6,"column":2,"endLine":6,"endColumn":20,"ancestors":[],"references":["value","failure"]},{"id":5,"kind":"return","line":7,"column":2,"endLine":7,"endColumn":20,"ancestors":[],"references":["value","failure"]}]}');
+    INSERT INTO semantic_units VALUES (1,1,1,'go','function','load',1,1,8,2,'fixture','{"key":"go:function:load","bindings":[{"id":"once","name":"once","type":"sync.Once","scope":"package"},{"id":"value","name":"value","type":"Store","scope":"package"},{"id":"failure","name":"failure","type":"ConcreteFailure","traits":["error"],"scope":"package"}],"operations":[{"id":1,"kind":"call","line":2,"column":2,"endLine":4,"endColumn":3,"ancestors":[],"method":"Do","receiverType":"sync.Once","receiverBinding":"once"},{"id":2,"kind":"assignment","line":3,"column":4,"endLine":3,"endColumn":30,"ancestors":[1],"operator":"=","sourceKind":"call","sourceOperation":3,"targets":["value","failure"]},{"id":3,"kind":"call","line":3,"column":21,"endLine":3,"endColumn":30,"ancestors":[1],"name":"construct"},{"id":4,"kind":"return","line":6,"column":2,"endLine":6,"endColumn":20,"ancestors":[],"references":["value","failure"]},{"id":5,"kind":"return","line":7,"column":2,"endLine":7,"endColumn":20,"ancestors":[],"references":["value","failure"]},{"id":6,"kind":"return","line":3,"column":5,"endLine":3,"endColumn":20,"ancestors":[1],"references":["value","failure"]}]}');
   `);
   db.close();
   return dir;
@@ -80,7 +80,12 @@ describe("repo graph", () => {
             { capture: "failure", scope: "package", trait: "error" },
           ],
         },
-        { kind: "return", after: "guard", references: ["value", "failure"] },
+        {
+          kind: "return",
+          after: "guard",
+          outside: "guard",
+          references: ["value", "failure"],
+        },
       ],
     });
     expect(matches).toHaveLength(1);
@@ -105,6 +110,48 @@ describe("repo graph", () => {
         ],
       }),
     ).toHaveLength(0);
+    graph.close();
+  });
+
+  it("excludes operations nested inside a captured call", async () => {
+    const graph = await openRepoGraph(await writeFixtureGraph());
+    const commonSteps = [
+      { kind: "call" as const, capture: "guard", method: "Do", receiverType: "sync.Once" },
+      {
+        kind: "assignment" as const,
+        within: "guard",
+        targets: [{ capture: "value" }, { capture: "failure" }],
+      },
+    ];
+    const allLater = graph.semanticMatches({
+      language: "go",
+      within: "function",
+      steps: [
+        ...commonSteps,
+        {
+          kind: "return",
+          capture: "observed",
+          after: "guard",
+          references: ["value", "failure"],
+        },
+      ],
+    });
+    const outsideLater = graph.semanticMatches({
+      language: "go",
+      within: "function",
+      steps: [
+        ...commonSteps,
+        {
+          kind: "return",
+          capture: "observed",
+          after: "guard",
+          outside: "guard",
+          references: ["value", "failure"],
+        },
+      ],
+    });
+    expect(allLater).toHaveLength(3);
+    expect(outsideLater).toHaveLength(2);
     graph.close();
   });
 
@@ -159,6 +206,19 @@ describe("repo graph", () => {
         ],
       }),
     ).toThrow(/cannot be after its own direct source call/);
+  });
+
+  it("rejects contradictory containment relationships", () => {
+    expect(() =>
+      defineSemanticQuery({
+        language: "go",
+        within: "function",
+        steps: [
+          { kind: "call", capture: "guard" },
+          { kind: "return", within: "guard", outside: "guard" },
+        ],
+      }),
+    ).toThrow(/both within and outside/);
   });
 
   it("rejects invalid multi-binding references", () => {

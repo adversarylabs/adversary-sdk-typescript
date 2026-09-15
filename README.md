@@ -254,7 +254,7 @@ const query = defineSemanticQuery({
       { capture: "value", scope: "package" },
       { capture: "failure", scope: "package", trait: "error" },
     ] },
-    { kind: "return", after: "guard", references: ["value", "failure"] },
+    { kind: "return", after: "guard", outside: "guard", references: ["value", "failure"] },
   ],
 });
 const matches = ctx.repoGraph?.semanticMatches(query) ?? [];
@@ -267,6 +267,9 @@ nothing. An assignment linked with `source` must not also be `after` that source
 call is nested inside the assignment and therefore starts later in source order. Rules remain
 responsible for policy, severity, and finding language. `references` accepts one capture name or
 an array when the same operation must reference every captured binding.
+Use `outside` with an earlier captured call to require that an operation is not lexically nested
+inside that call. Combined with `after`, this distinguishes an enclosing-function return after a
+callback-bearing guard from a return inside the callback itself.
 Binding `trait` constraints are adapter-neutral semantic categories. For example, a language
 adapter may mark both an interface-typed failure and a concrete failure implementation with the
 `error` trait, avoiding brittle exact type-name checks in adversaries.

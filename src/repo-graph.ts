@@ -130,6 +130,7 @@ export interface SemanticOperationPattern {
   kind: SemanticOperation["kind"];
   capture?: string;
   within?: string;
+  outside?: string;
   after?: string;
   name?: string;
   method?: string;
@@ -210,6 +211,14 @@ export function defineSemanticQuery<T extends SemanticQuery>(query: T): T {
   for (const [index, step] of query.steps.entries()) {
     const label = `steps[${index}]`;
     if (step.within) requireCapture(step.within, `${label}.within`, "operation", "call");
+    if (step.outside) {
+      requireCapture(step.outside, `${label}.outside`, "operation", "call");
+      if (step.outside === step.within) {
+        throw new SemanticQueryValidationError(
+          `${label} cannot be both within and outside the same operation`,
+        );
+      }
+    }
     if (step.after) requireCapture(step.after, `${label}.after`, "operation");
     if (step.source) {
       if (step.kind !== "assignment" || step.sourceKind !== "call") {
@@ -646,6 +655,15 @@ function operationMatches(
   if (pattern.within) {
     const parent = captures[pattern.within];
     if (!parent || !("kind" in parent) || !operation.ancestors.includes(parent.id)) return false;
+  }
+  if (pattern.outside) {
+    const excludedParent = captures[pattern.outside];
+    if (
+      !excludedParent ||
+      !("kind" in excludedParent) ||
+      operation.ancestors.includes(excludedParent.id)
+    )
+      return false;
   }
   if (pattern.after) {
     const previous = captures[pattern.after];
