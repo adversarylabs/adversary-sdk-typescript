@@ -75,9 +75,12 @@ describe("repo graph", () => {
           source: "constructor",
           operator: "=",
           sourceKind: "call",
-          targets: [{ scope: "package" }, { capture: "failure", scope: "package", type: "error" }],
+          targets: [
+            { capture: "value", scope: "package" },
+            { capture: "failure", scope: "package", type: "error" },
+          ],
         },
-        { kind: "return", after: "guard", references: "failure" },
+        { kind: "return", after: "guard", references: ["value", "failure"] },
       ],
     });
     expect(matches).toHaveLength(1);
@@ -152,6 +155,26 @@ describe("repo graph", () => {
         ],
       }),
     ).toThrow(/cannot be after its own direct source call/);
+  });
+
+  it("rejects invalid multi-binding references", () => {
+    expect(() =>
+      defineSemanticQuery({
+        language: "go",
+        within: "function",
+        steps: [{ kind: "return", references: [] }],
+      }),
+    ).toThrow(/references must not be empty/);
+    expect(() =>
+      defineSemanticQuery({
+        language: "go",
+        within: "function",
+        steps: [
+          { kind: "assignment", targets: [{ capture: "value" }] },
+          { kind: "return", references: ["value", "missing"] },
+        ],
+      }),
+    ).toThrow(/unknown earlier capture "missing"/);
   });
 
   it("loads from the environment and degrades safely", async () => {

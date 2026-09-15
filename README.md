@@ -251,10 +251,10 @@ const query = defineSemanticQuery({
     { kind: "call", capture: "guard", method: "Do", receiverType: "sync.Once" },
     { kind: "call", capture: "constructor", name: "connect", within: "guard" },
     { kind: "assignment", within: "guard", source: "constructor", operator: "=", sourceKind: "call", targets: [
-      { scope: "package" },
+      { capture: "value", scope: "package" },
       { capture: "failure", scope: "package", type: "error" },
     ] },
-    { kind: "return", after: "guard", references: "failure" },
+    { kind: "return", after: "guard", references: ["value", "failure"] },
   ],
 });
 const matches = ctx.repoGraph?.semanticMatches(query) ?? [];
@@ -265,7 +265,8 @@ operations or bindings. `defineSemanticQuery` rejects unknown, duplicate, or typ
 capture references when the adversary loads, so malformed query contracts cannot silently match
 nothing. An assignment linked with `source` must not also be `after` that source: the direct RHS
 call is nested inside the assignment and therefore starts later in source order. Rules remain
-responsible for policy, severity, and finding language.
+responsible for policy, severity, and finding language. `references` accepts one capture name or
+an array when the same operation must reference every captured binding.
 
 ### Opinion framing (`formatOpinion` / `formatOpinionAsync`)
 

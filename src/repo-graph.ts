@@ -136,7 +136,7 @@ export interface SemanticOperationPattern {
   sourceKind?: SemanticOperation["sourceKind"];
   source?: string;
   targets?: readonly SemanticTargetPattern[];
-  references?: string;
+  references?: string | readonly string[];
 }
 
 export interface SemanticQuery {
@@ -222,7 +222,14 @@ export function defineSemanticQuery<T extends SemanticQuery>(query: T): T {
         );
       }
     }
-    if (step.references) requireCapture(step.references, `${label}.references`, "binding");
+    const references =
+      typeof step.references === "string" ? [step.references] : (step.references ?? []);
+    if (references.length === 0 && Array.isArray(step.references)) {
+      throw new SemanticQueryValidationError(`${label}.references must not be empty`);
+    }
+    for (const reference of references) {
+      requireCapture(reference, `${label}.references`, "binding");
+    }
     addCapture(step.capture, "operation", step.kind);
     for (const target of step.targets ?? []) addCapture(target.capture, "binding");
   }
@@ -660,9 +667,13 @@ function operationMatches(
     }
   }
   if (pattern.references) {
-    const captured = captures[pattern.references];
-    if (!captured || "kind" in captured || !operation.references?.includes(captured.id))
-      return false;
+    const references =
+      typeof pattern.references === "string" ? [pattern.references] : pattern.references;
+    for (const reference of references) {
+      const captured = captures[reference];
+      if (!captured || "kind" in captured || !operation.references?.includes(captured.id))
+        return false;
+    }
   }
   return true;
 }
