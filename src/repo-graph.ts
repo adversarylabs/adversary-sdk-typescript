@@ -81,6 +81,7 @@ export interface SemanticBinding {
   id: string;
   name: string;
   type?: string;
+  traits?: readonly string[];
   scope: SemanticBindingScope;
 }
 
@@ -122,6 +123,7 @@ export interface SemanticTargetPattern {
   capture?: string;
   scope?: SemanticBindingScope;
   type?: string;
+  trait?: string;
 }
 
 export interface SemanticOperationPattern {
@@ -661,7 +663,8 @@ function operationMatches(
       if (
         !binding ||
         (target.scope && binding.scope !== target.scope) ||
-        (target.type && binding.type !== target.type)
+        (target.type && binding.type !== target.type) ||
+        (target.trait && !binding.traits?.includes(target.trait))
       )
         return false;
     }

@@ -252,7 +252,7 @@ const query = defineSemanticQuery({
     { kind: "call", capture: "constructor", name: "connect", within: "guard" },
     { kind: "assignment", within: "guard", source: "constructor", operator: "=", sourceKind: "call", targets: [
       { capture: "value", scope: "package" },
-      { capture: "failure", scope: "package", type: "error" },
+      { capture: "failure", scope: "package", trait: "error" },
     ] },
     { kind: "return", after: "guard", references: ["value", "failure"] },
   ],
@@ -267,6 +267,9 @@ nothing. An assignment linked with `source` must not also be `after` that source
 call is nested inside the assignment and therefore starts later in source order. Rules remain
 responsible for policy, severity, and finding language. `references` accepts one capture name or
 an array when the same operation must reference every captured binding.
+Binding `trait` constraints are adapter-neutral semantic categories. For example, a language
+adapter may mark both an interface-typed failure and a concrete failure implementation with the
+`error` trait, avoiding brittle exact type-name checks in adversaries.
 
 ### Opinion framing (`formatOpinion` / `formatOpinionAsync`)
 
