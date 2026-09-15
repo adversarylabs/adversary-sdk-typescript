@@ -18,7 +18,7 @@ async function writeFixtureGraph(): Promise<string> {
     join(dir, "meta.json"),
     `${JSON.stringify({
       schemaVersion: "v2",
-      adapterRevision: "go-semantic-operations-v2+ts-syntax-v1",
+      adapterRevision: "go-semantic-operations-v3+ts-syntax-v1",
       fingerprint: "fixture",
       repoPath: "/fixture",
       builtAt: new Date(0).toISOString(),
@@ -95,6 +95,29 @@ describe("repo graph", () => {
       type: "ConcreteFailure",
       traits: ["error"],
     });
+    graph.close();
+  });
+
+  it("normalizes nullable adapter arrays at the graph boundary", async () => {
+    const dir = await writeFixtureGraph();
+    const database = new DatabaseSync(join(dir, "graph.sqlite"));
+    database
+      .prepare(
+        "UPDATE semantic_units SET data=replace(data, '\"ancestors\":[]', '\"ancestors\":null')",
+      )
+      .run();
+    database.close();
+    const graph = await openRepoGraph(dir);
+    expect(
+      graph.semanticMatches({
+        language: "go",
+        within: "function",
+        steps: [
+          { kind: "call", capture: "guard", method: "Do", receiverType: "sync.Once" },
+          { kind: "return", after: "guard", outside: "guard" },
+        ],
+      }),
+    ).toHaveLength(1);
     graph.close();
   });
 

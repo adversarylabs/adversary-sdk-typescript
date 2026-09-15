@@ -5,7 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 
 export const ADVERSARY_REPO_GRAPH_ENV = "ADVERSARY_REPO_GRAPH";
 export const REPO_GRAPH_SCHEMA_VERSION = "v2";
-export const REPO_GRAPH_ADAPTER_REVISION = "go-semantic-operations-v2+ts-syntax-v1";
+export const REPO_GRAPH_ADAPTER_REVISION = "go-semantic-operations-v3+ts-syntax-v1";
 
 export interface RepoGraphMeta {
   schemaVersion: string;
@@ -577,8 +577,14 @@ function edgeRow(row: RowRecord): RepoGraphEdge {
 
 interface SemanticUnitData {
   key: string;
-  bindings: SemanticBinding[];
-  operations: SemanticOperation[];
+  bindings: Array<Omit<SemanticBinding, "traits"> & { traits?: string[] | null }>;
+  operations: Array<
+    Omit<SemanticOperation, "ancestors" | "targets" | "references"> & {
+      ancestors?: number[] | null;
+      targets?: string[] | null;
+      references?: string[] | null;
+    }
+  >;
 }
 
 function semanticUnitRow(row: RowRecord): SemanticUnit {
@@ -594,8 +600,16 @@ function semanticUnitRow(row: RowRecord): SemanticUnit {
     column: number(row.column),
     endLine: number(row.end_line),
     endColumn: number(row.end_column),
-    bindings: data.bindings,
-    operations: data.operations,
+    bindings: data.bindings.map(({ traits, ...binding }) => ({
+      ...binding,
+      ...(Array.isArray(traits) ? { traits } : {}),
+    })),
+    operations: data.operations.map(({ ancestors, targets, references, ...operation }) => ({
+      ...operation,
+      ancestors: Array.isArray(ancestors) ? ancestors : [],
+      ...(Array.isArray(targets) ? { targets } : {}),
+      ...(Array.isArray(references) ? { references } : {}),
+    })),
   };
 }
 
