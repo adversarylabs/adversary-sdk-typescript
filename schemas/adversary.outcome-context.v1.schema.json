@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://adversarylabs.ai/schemas/adversary.outcome-context.v1.schema.json",
-  "title": "Adversary outcome context v1",
+  "$id": "https://adversary.dev/schemas/adversary.outcome-context.v1.schema.json",
+  "title": "Adversary Outcome Context v1",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "subject", "sources", "intent"],
@@ -10,24 +10,68 @@
     "subject": {
       "type": "object",
       "additionalProperties": false,
+      "required": ["provider", "repository", "pull_request"],
       "properties": {
-        "provider": { "type": "string", "maxLength": 100 },
-        "repository": { "type": "string", "maxLength": 500 },
+        "provider": { "const": "github" },
+        "repository": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500,
+          "pattern": "[^\\s\u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF]"
+        },
         "pull_request": { "type": "integer", "minimum": 1 }
       }
     },
     "sources": {
       "type": "array",
       "minItems": 1,
-      "maxItems": 2,
+      "maxItems": 12,
+      "allOf": [
+        {
+          "not": {
+            "contains": {
+              "type": "object",
+              "required": ["kind"],
+              "properties": { "kind": { "const": "pull_request_title" } }
+            },
+            "minContains": 2
+          }
+        },
+        {
+          "not": {
+            "contains": {
+              "type": "object",
+              "required": ["kind"],
+              "properties": { "kind": { "const": "pull_request_body" } }
+            },
+            "minContains": 2
+          }
+        }
+      ],
       "items": {
         "type": "object",
         "additionalProperties": false,
         "required": ["kind", "text"],
         "properties": {
-          "kind": { "enum": ["pull_request_title", "pull_request_body"] },
-          "text": { "type": "string", "minLength": 1, "maxLength": 32768 }
-        }
+          "kind": {
+            "enum": [
+              "pull_request_title",
+              "pull_request_body",
+              "linked_issue",
+              "human_clarification"
+            ]
+          },
+          "reference_url": { "type": "string", "maxLength": 2048, "pattern": "^https://[^/@]+/" },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32768,
+            "pattern": "[^\\s\u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF]"
+          }
+        },
+        "if": { "properties": { "kind": { "const": "linked_issue" } } },
+        "then": { "required": ["reference_url"] },
+        "else": { "not": { "required": ["reference_url"] } }
       }
     },
     "intent": {
@@ -42,7 +86,12 @@
         "ambiguities"
       ],
       "properties": {
-        "objective": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "objective": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500,
+          "pattern": "[^\\s\u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF]"
+        },
         "confidence": { "enum": ["low", "medium", "high"] },
         "expected_effects": { "$ref": "#/$defs/stringList" },
         "must_preserve": { "$ref": "#/$defs/stringList" },
@@ -55,7 +104,12 @@
     "stringList": {
       "type": "array",
       "maxItems": 12,
-      "items": { "type": "string", "minLength": 1, "maxLength": 500 }
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 500,
+        "pattern": "[^\\s\u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF]"
+      }
     }
   }
 }

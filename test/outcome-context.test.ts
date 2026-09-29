@@ -66,6 +66,60 @@ describe("outcome context", () => {
     );
   });
 
+  it("accepts linked issues and repeated human clarifications", () => {
+    const context = parseOutcomeContext({
+      ...wireContext,
+      sources: [
+        ...wireContext.sources,
+        {
+          kind: "linked_issue",
+          text: "COM-8: harden type checks",
+          reference_url: "https://linear.app/acme/issue/COM-8",
+        },
+        { kind: "human_clarification", text: "Keep the build unchanged." },
+        { kind: "human_clarification", text: "Keep the lint command unchanged." },
+      ],
+    });
+    expect(context.sources[2]).toMatchObject({
+      kind: "linked_issue",
+      referenceUrl: "https://linear.app/acme/issue/COM-8",
+    });
+    expect(context.sources).toHaveLength(5);
+  });
+
+  it("requires an HTTPS reference only for linked issues", () => {
+    expect(() =>
+      parseOutcomeContext({
+        ...wireContext,
+        sources: [
+          {
+            kind: "linked_issue",
+            text: "Issue",
+            reference_url: "http://linear.app/acme/issue/COM-8",
+          },
+        ],
+      }),
+    ).toThrow(/HTTPS reference_url/);
+    expect(() =>
+      parseOutcomeContext({
+        ...wireContext,
+        sources: [
+          {
+            kind: "human_clarification",
+            text: "Keep behavior",
+            reference_url: "https://linear.app/acme/issue/COM-8",
+          },
+        ],
+      }),
+    ).toThrow(/only linked_issue/);
+    expect(() =>
+      parseOutcomeContext({
+        ...wireContext,
+        sources: Array(13).fill({ kind: "human_clarification", text: "Keep behavior" }),
+      }),
+    ).toThrow(/twelve/);
+  });
+
   it("enforces schema character limits for subjects", () => {
     expect(() =>
       parseOutcomeContext({

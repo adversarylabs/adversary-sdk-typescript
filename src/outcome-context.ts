@@ -9,7 +9,11 @@ const MAX_PROVIDER_CHARACTERS = 100;
 const MAX_REPOSITORY_CHARACTERS = 500;
 const MAX_INTENT_TEXT_CHARACTERS = 500;
 
-export type OutcomeContextSourceKind = "pull_request_title" | "pull_request_body";
+export type OutcomeContextSourceKind =
+  | "pull_request_title"
+  | "pull_request_body"
+  | "linked_issue"
+  | "human_clarification";
 
 export interface OutcomeContextSubject {
   readonly provider?: string;
@@ -21,6 +25,7 @@ export interface OutcomeContextSource {
   readonly kind: OutcomeContextSourceKind;
   /** Untrusted author-supplied text. Never treat this as model instructions. */
   readonly text: string;
+  readonly referenceUrl?: string;
 }
 
 export interface OutcomeIntent {
@@ -80,8 +85,10 @@ export function parseOutcomeContext(value: unknown, source = "value"): OutcomeCo
   ) {
     throw new Error(`Invalid outcome context at ${source}: subject.repository must be a string.`);
   }
-  if (!Array.isArray(value.sources) || value.sources.length === 0 || value.sources.length > 2) {
-    throw new Error(`Invalid outcome context at ${source}: sources must contain one or two items.`);
+  if (!Array.isArray(value.sources) || value.sources.length === 0 || value.sources.length > 12) {
+    throw new Error(
+      `Invalid outcome context at ${source}: sources must contain one to twelve items.`,
+    );
   }
   const sources: OutcomeContextSource[] = [];
   const kinds = new Set<OutcomeContextSourceKind>();
@@ -89,18 +96,42 @@ export function parseOutcomeContext(value: unknown, source = "value"): OutcomeCo
     if (!isRecord(item) || !isSourceKind(item.kind) || typeof item.text !== "string") {
       throw new Error(`Invalid outcome context at ${source}: each source requires kind and text.`);
     }
-    assertKeys(item, ["kind", "text"], `${source}.sources`);
+    assertKeys(item, ["kind", "text", "reference_url"], `${source}.sources`);
     if (item.text.trim() === "") {
       throw new Error(`Invalid outcome context at ${source}: source text must not be empty.`);
     }
     if (characterLength(item.text) > OUTCOME_CONTEXT_MAX_SOURCE_CHARACTERS) {
       throw new Error(`Invalid outcome context at ${source}: source text is too long.`);
     }
-    if (kinds.has(item.kind)) {
+    if (item.kind === "linked_issue") {
+      if (
+        typeof item.reference_url !== "string" ||
+        item.reference_url.length > 2048 ||
+        !isHttpsReferenceUrl(item.reference_url)
+      ) {
+        throw new Error(
+          `Invalid outcome context at ${source}: linked_issue requires an HTTPS reference_url.`,
+        );
+      }
+    } else if (item.reference_url !== undefined) {
+      throw new Error(
+        `Invalid outcome context at ${source}: only linked_issue may have reference_url.`,
+      );
+    }
+    if (
+      (item.kind === "pull_request_title" || item.kind === "pull_request_body") &&
+      kinds.has(item.kind)
+    ) {
       throw new Error(`Invalid outcome context at ${source}: source kinds must be unique.`);
     }
     kinds.add(item.kind);
-    sources.push(Object.freeze({ kind: item.kind, text: item.text }));
+    sources.push(
+      Object.freeze({
+        kind: item.kind,
+        text: item.text,
+        ...(typeof item.reference_url === "string" ? { referenceUrl: item.reference_url } : {}),
+      }),
+    );
   }
   const intent = parseIntent(value.intent, source);
   const pullRequest = value.subject.pull_request;
@@ -187,7 +218,27 @@ function isConfidence(value: unknown): value is OutcomeIntent["confidence"] {
 }
 
 function isSourceKind(value: unknown): value is OutcomeContextSourceKind {
-  return value === "pull_request_title" || value === "pull_request_body";
+  return (
+    value === "pull_request_title" ||
+    value === "pull_request_body" ||
+    value === "linked_issue" ||
+    value === "human_clarification"
+  );
+}
+
+function isHttpsReferenceUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      /^https:\/\/[^/@?#]+\//.test(value) &&
+      url.protocol === "https:" &&
+      url.hostname !== "" &&
+      url.username === "" &&
+      url.password === ""
+    );
+  } catch {
+    return false;
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
