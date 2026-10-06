@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
-import { ModelReviewError, type ModelReviewRequest, type ReviewModel } from "../src/model.js";
+import type { ModelReviewRequest, ReviewModel } from "../src/model.js";
 import { reviewWithRepositoryTools } from "../src/repository-model.js";
 
 // Customer source remains outside this repository. Supply an isolated checkout
@@ -70,32 +70,31 @@ describe.skipIf(root === undefined)("recorded job d5d35cd6 source replay", () =>
     expect(result.output).toEqual({ replayComplete: true });
   });
 
-  it("reports the exact SDK recovery stage before failing with zero source evidence", async () => {
+  it("reports the exact SDK recovery stage while finishing with zero source evidence", async () => {
     const log = vi.spyOn(process.stderr, "write").mockReturnValue(true);
     vi.stubEnv("HOSTED_REVIEW_JOB_ID", job.jobId);
     const finalRequests: ModelReviewRequest[] = [];
     try {
-      const failure: unknown = await replay(1, finalRequests).catch((error: unknown) => error);
-      expect(failure).toBeInstanceOf(ModelReviewError);
-      expect(failure).toMatchObject({
-        code: "repository_evidence_incomplete",
-        message: expect.stringContaining("[repository_evidence_recovery]"),
-        diagnostics: {
-          job_id: job.jobId,
-          reviewer: job.reviewer,
-          stage: "repository_evidence_recovery",
-          sourceCount: 0,
-          exhausted: true,
-        },
+      const result = await replay(1, finalRequests);
+      expect(result.retrieval).toMatchObject({
+        filesRead: 0,
+        exhausted: true,
+        changedHunksCovered: false,
+        coverage: { status: "partial" },
       });
       const events = log.mock.calls
         .map(([value]) => String(value))
-        .filter((value) => value.startsWith('{"event":"repository.missing-source-evidence"'))
+        .filter((value) => value.startsWith('{"event":"repository.coverage-gap"'))
         .map((value) => JSON.parse(value));
-      expect(events).toEqual([(failure as ModelReviewError).diagnostics]);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        job_id: job.jobId,
+        reviewer: job.reviewer,
+        sourceCount: 0,
+      });
       expect(events[0].hunkCount).toBeGreaterThan(0);
       expect(events[0].retrievalCalls).toEqual({ read_change: 1, read_file: 0, failed: 0 });
-      expect(finalRequests).toHaveLength(0);
+      expect(finalRequests).toHaveLength(1);
       for (const path of job.changedFiles) expect(JSON.stringify(events)).not.toContain(path);
     } finally {
       log.mockRestore();

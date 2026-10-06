@@ -46,6 +46,7 @@ export {
 } from "./model.js";
 export type {
   ModelRepositoryCitation,
+  ModelRepositoryCoverage,
   ModelRepositoryChange,
   ModelRepositoryRetrieval,
   ModelRepositoryToolOptions,
