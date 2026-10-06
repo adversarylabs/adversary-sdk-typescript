@@ -228,6 +228,14 @@ results under `repository.toolResults`. Final output schemas should cite the sup
 `citationId` and a line inside its inclusive range. The SDK never exposes arbitrary shell tools,
 follows repository symlinks, or sends provider credentials into the adversary process.
 
+For changed-file reviews, a planner that stops without reading source is recovered inside
+the same retrieval session. The SDK reads up to eight changed files per recovery round
+(up to 200 lines each, near a retrieved patch hunk when available), then resumes planning.
+These reads use the same exclusions, filesystem checks, and remaining budgets as ordinary
+model-selected operations. Identical failed reads are not repeated. The optional
+`review.retrieval.sourceReadRecoveries` counter records recovery rounds. Unavailable or
+excluded source remains an explicit gap; recovery never manufactures citations or a clean verdict.
+
 Declare `permissions.model: true` in `adversary.yaml`. The adversary process receives only a
 short-lived authenticated loopback broker endpoint. Provider credentials, provider selection,
 network transport, retries, and provider-specific response handling remain owned by the CLI.

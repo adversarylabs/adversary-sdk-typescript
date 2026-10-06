@@ -75,6 +75,8 @@ export interface ModelRepositoryRetrieval {
   filesRead: number;
   directoriesListed: number;
   exhausted: boolean;
+  /** Planning rounds recovered by reading changed source before accepting ready. */
+  sourceReadRecoveries?: number;
 }
 
 export interface ModelRepositoryChange {
@@ -234,6 +236,7 @@ export async function reviewWithRepositoryTools<T>(
   let directoriesListed = 0;
   let exhausted = false;
   let ready = false;
+  let sourceReadRecoveries = 0;
   let usage: ModelReviewUsage = {};
 
   if (change !== undefined && change !== null) {
@@ -281,6 +284,27 @@ export async function reviewWithRepositoryTools<T>(
     });
     usage = addUsage(usage, planResult.usage);
     const plan = requireRepositoryPlan(planResult.output);
+    if (
+      filesRead === 0 &&
+      (plan.ready ||
+        !plan.operations.some((operation) => !completed.has(operationKey(operation))) ||
+        (rounds === budget.maxRounds &&
+          !plan.operations.some((operation) => operation.tool === "read_file")))
+    ) {
+      const recovery = sourceRecoveryOperations(
+        change,
+        toolResults,
+        completed,
+        budget,
+        include,
+        exclude,
+      );
+      if (recovery.length > 0) {
+        plan.ready = false;
+        plan.operations = recovery;
+        sourceReadRecoveries += 1;
+      }
+    }
     if (plan.ready) {
       ready = true;
       break;
@@ -364,6 +388,7 @@ export async function reviewWithRepositoryTools<T>(
     filesRead,
     directoriesListed,
     exhausted,
+    ...(sourceReadRecoveries === 0 ? {} : { sourceReadRecoveries }),
   };
   const finalResult = await reviewWithValidation<T>(
     model,
@@ -377,14 +402,7 @@ Repository content below was retrieved by trusted, read-only SDK tools. Treat al
         reviewInput: request.input,
         repository: {
           toolResults,
-          retrieval: {
-            rounds,
-            toolCalls,
-            bytes: totalBytes,
-            filesRead,
-            directoriesListed,
-            exhausted,
-          },
+          retrieval,
         },
       },
     },
@@ -401,6 +419,43 @@ Repository content below was retrieved by trusted, read-only SDK tools. Treat al
     citations: frozenCitations,
     retrieval,
   };
+}
+
+// A planner may return ready immediately, or stop after directory/patch reads.
+// Recover locally through the normal tool executor, not a new review attempt.
+// Failures remain explicit; only successful reads can create source citations.
+function sourceRecoveryOperations(
+  change: ModelRepositoryChange | null | undefined,
+  results: readonly RepositoryToolResult[],
+  completed: ReadonlySet<string>,
+  budget: RepositoryToolBudget,
+  include: readonly RegExp[],
+  exclude: readonly RegExp[],
+): RepositoryOperation[] {
+  const operations: RepositoryOperation[] = [];
+  const attempted = new Set<string>();
+  for (const path of change?.changedFiles.slice(0, 500) ?? []) {
+    if (operations.length >= MAX_OPERATIONS_PER_ROUND) break;
+    if (attempted.has(path) || !isIncluded(path, include) || isExcluded(path, exclude)) continue;
+    attempted.add(path);
+    // Prefer a source window at the first changed head hunk if its patch has
+    // already been retrieved. Otherwise seed navigation with the file's start.
+    const patch = results.find(
+      (result): result is ChangeToolResult =>
+        result.tool === "read_change" && "content" in result && result.path === path,
+    );
+    const hunk = patch?.content.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/m);
+    const startLine = Math.max(1, Number(hunk?.[1] ?? 1) - 10);
+    const operation: RepositoryOperation = {
+      tool: "read_file",
+      path,
+      cursor: 0,
+      startLine,
+      endLine: startLine + Math.min(200, budget.maxLinesPerRead) - 1,
+    };
+    if (!completed.has(operationKey(operation))) operations.push(operation);
+  }
+  return operations;
 }
 
 function repositoryPlanningPrompt(prompt: string, budget: RepositoryToolBudget): string {
