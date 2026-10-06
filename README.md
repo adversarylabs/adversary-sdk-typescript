@@ -1039,3 +1039,24 @@ citations. Rename, mode, binary, and empty-file metadata patches have no head te
 hunks to read; their retrieved patch evidence satisfies that requirement. The SDK
 records `changedHunksCovered: true` only after this deterministic check succeeds.
 Missing, malformed, and truncated patch evidence still prevents completion.
+
+### Changed-source recovery limits and diagnostics
+
+Repository-tool reviews require a base revision when in-scope changed files need
+coverage. Runtime changed-file inputs without `change.base_ref` fail during parsing;
+direct model-tool callers receive `invalid_model_request` before planning starts.
+Changes with no in-scope files need no recovery reads.
+
+The change summary is bounded to the first 500 entries. For larger changes,
+`retrieval.omittedChangedFiles` records the omitted count and
+`changedHunksCovered` is not asserted. The same gap is included in the model's
+change summary; source coverage is enforced for the in-scope summarized files
+within the existing retrieval budgets. Untracked worktree files use a read-only
+new-file diff and do not modify the Git index.
+
+When coverage cannot be completed, `ModelReviewError.diagnostics` and a JSON event
+on stderr identify the `repository_evidence_recovery` stage, job ID when available,
+adversary name for rule-context model calls, retrieval-call counts, hunk and source
+counts, and explicit failure reasons. Paths, prompts, source content, and raw tool
+errors are excluded. Direct model-tool callers may pass reviewer identity as the
+optional final argument to `reviewWithRepositoryTools`.

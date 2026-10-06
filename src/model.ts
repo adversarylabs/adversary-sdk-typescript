@@ -137,11 +137,20 @@ export class ModelUnavailableError extends Error {
 export class ModelReviewError extends Error {
   readonly code?: string;
   readonly retryable: boolean;
+  readonly diagnostics?: Readonly<Record<string, unknown>>;
 
-  constructor(message: string, options: { code?: string; retryable?: boolean } = {}) {
+  constructor(
+    message: string,
+    options: {
+      code?: string;
+      retryable?: boolean;
+      diagnostics?: Readonly<Record<string, unknown>>;
+    } = {},
+  ) {
     super(message);
     this.name = "ModelReviewError";
     this.code = options.code;
+    this.diagnostics = options.diagnostics;
     this.retryable = options.retryable ?? false;
   }
 }

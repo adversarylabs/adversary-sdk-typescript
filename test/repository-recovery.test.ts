@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import type { ModelReviewRequest, ReviewModel } from "../src/model.js";
 import {
   type ModelRepositoryToolOptions,
@@ -17,6 +17,8 @@ async function fixture(
   baseSource = "export const value = 'old';\nsecond line\nthird line\n",
   modeOnly = false,
   sourcePath = "source.ts",
+  baseRef: string | undefined = "HEAD",
+  untracked = false,
 ) {
   const root = await mkdtemp(join(tmpdir(), "sdk-source-recovery-"));
   try {
@@ -40,6 +42,23 @@ async function fixture(
     await mkdir(join(root, "vendor"), { recursive: true });
     await writeFile(join(root, "vendor", "hidden.ts"), "excluded source");
     await symlink(join(root, "source.ts"), join(root, "link.ts"));
+    if (untracked) {
+      execFileSync("git", ["-C", root, "rm", "--cached", sourcePath]);
+      execFileSync("git", [
+        "-C",
+        root,
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.com",
+        "commit",
+        "-qm",
+        "remove source",
+      ]);
+    }
+    const indexBefore = execFileSync("git", ["-C", root, "ls-files", "--stage"], {
+      encoding: "utf8",
+    });
     const requests: ModelReviewRequest[] = [];
     let planningCalls = 0;
     let finalCalls = 0;
@@ -74,7 +93,11 @@ async function fixture(
         },
         tools: { repository: { maxRounds: 4, ...options } },
       },
-      { baseRef: "HEAD", changedFiles, worktree: true },
+      { baseRef, changedFiles, worktree: true },
+      "fixture-reviewer",
+    );
+    expect(execFileSync("git", ["-C", root, "ls-files", "--stage"], { encoding: "utf8" })).toBe(
+      indexBefore,
     );
     return { result, requests, planningCalls, finalCalls };
   } finally {
@@ -237,3 +260,82 @@ it.each(["docs/vendor/helm-install-release.md", "vendor/guide.md"])(
     ).toBe(true);
   },
 );
+
+it.each([{ exclude: ["**/*.ts"] }, { include: ["**/*.go"] }])(
+  "completes an entirely out-of-scope change: %j",
+  async (options) => {
+    const { result, planningCalls } = await fixture(["source.ts"], options);
+    expect(planningCalls).toBe(1);
+    expect(result.retrieval?.toolCalls).toBe(0);
+  },
+);
+
+it("captures untracked worktree text without changing the index", async () => {
+  const { result } = await fixture(
+    undefined,
+    {},
+    undefined,
+    undefined,
+    undefined,
+    false,
+    "source.ts",
+    "HEAD",
+    true,
+  );
+  expect(result.retrieval?.changedHunksCovered).toBe(true);
+  expect(result.citations?.[0].content).toContain("source evidence");
+});
+
+it("rejects a missing base revision before asking the model to plan", async () => {
+  const model: ReviewModel = { review: vi.fn() };
+  await expect(
+    reviewWithRepositoryTools(
+      model,
+      ".",
+      {
+        prompt: "review",
+        input: {},
+        schema: {},
+        tools: { repository: {} },
+      },
+      { changedFiles: ["source.ts"], worktree: true },
+    ),
+  ).rejects.toMatchObject({ code: "invalid_model_request" });
+  expect(model.review).not.toHaveBeenCalled();
+});
+
+it("reports files outside the 500-file summary as a gap without claiming full coverage", async () => {
+  const { result, requests } = await fixture(
+    ["source.ts", ...Array.from({ length: 499 }, (_, i) => `excluded-${i}.go`), "omitted.ts"],
+    { include: ["**/*.ts"] },
+  );
+  expect(result.retrieval?.omittedChangedFiles).toBe(1);
+  expect(result.retrieval?.changedHunksCovered).toBeUndefined();
+  expect(JSON.stringify(requests.at(-1)?.input)).toContain('"omittedChangedFiles":1');
+});
+
+it("emits stage diagnostics and exposes failure counts without source or prompt content", async () => {
+  const log = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+  try {
+    await expect(fixture(undefined, { maxRounds: 1 })).rejects.toMatchObject({
+      diagnostics: {
+        stage: "repository_evidence_recovery",
+        hunkCount: 1,
+        coveredHunkCount: 0,
+        sourceCount: 0,
+        retrievalCalls: { read_change: 1, read_file: 0, failed: 0 },
+        reasons: ["source_window_not_covered"],
+      },
+    });
+    expect(
+      log.mock.calls.some(([value]) => String(value).includes('"reviewer":"fixture-reviewer"')),
+    ).toBe(true);
+    const output = log.mock.calls.map(([value]) => String(value)).join("");
+    expect(output).toContain('"stage":"repository_evidence_recovery"');
+    expect(output).not.toContain("source evidence");
+    expect(output).not.toContain("Review the change");
+    expect(output).not.toContain("source.ts");
+  } finally {
+    log.mockRestore();
+  }
+});
