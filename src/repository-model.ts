@@ -38,7 +38,6 @@ const defaultExcludedSegments = new Set([
   ".hg",
   ".svn",
   "node_modules",
-  "vendor",
   "dist",
   "build",
   "coverage",

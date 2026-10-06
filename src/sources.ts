@@ -18,7 +18,6 @@ export const DEFAULT_IGNORE_DIRECTORIES: readonly string[] = Object.freeze([
   "generated",
   "node_modules",
   "third_party",
-  "vendor",
 ]);
 
 export type InScopeSourceStatus = "changed" | "repository";

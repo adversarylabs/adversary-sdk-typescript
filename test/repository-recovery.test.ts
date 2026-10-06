@@ -16,12 +16,14 @@ async function fixture(
   source = "export const value = 'source evidence';\nsecond line\nthird line\n",
   baseSource = "export const value = 'old';\nsecond line\nthird line\n",
   modeOnly = false,
+  sourcePath = "source.ts",
 ) {
   const root = await mkdtemp(join(tmpdir(), "sdk-source-recovery-"));
   try {
     execFileSync("git", ["-C", root, "init", "-q"]);
-    await writeFile(join(root, "source.ts"), baseSource);
-    execFileSync("git", ["-C", root, "add", "source.ts"]);
+    await mkdir(join(root, sourcePath, ".."), { recursive: true });
+    await writeFile(join(root, sourcePath), baseSource);
+    execFileSync("git", ["-C", root, "add", sourcePath]);
     execFileSync("git", [
       "-C",
       root,
@@ -33,9 +35,9 @@ async function fixture(
       "-qm",
       "base",
     ]);
-    await writeFile(join(root, "source.ts"), source);
+    await writeFile(join(root, sourcePath), source);
     if (modeOnly) await chmod(join(root, "source.ts"), 0o755);
-    await mkdir(join(root, "vendor"));
+    await mkdir(join(root, "vendor"), { recursive: true });
     await writeFile(join(root, "vendor", "hidden.ts"), "excluded source");
     await symlink(join(root, "source.ts"), join(root, "link.ts"));
     const requests: ModelReviewRequest[] = [];
@@ -130,7 +132,9 @@ it("cannot complete recovery through missing source, symlinks, or traversal", as
 });
 
 it("recovers only in-scope changed files", async () => {
-  const { result } = await fixture(["vendor/hidden.ts", "source.ts"]);
+  const { result } = await fixture(["vendor/hidden.ts", "source.ts"], {
+    exclude: ["**/vendor/**"],
+  });
   expect(result.citations?.map((c) => c.path)).toEqual(["source.ts"]);
 });
 
@@ -205,3 +209,31 @@ it("mode-only and binary patches complete without nonexistent text reads", async
   const binary = await fixture(undefined, {}, undefined, "\0new", "\0old");
   expect(binary.result.retrieval).toMatchObject({ filesRead: 0, changedHunksCovered: true });
 });
+
+it.each(["docs/vendor/helm-install-release.md", "vendor/guide.md"])(
+  "reads changed source and patches in a folder named vendor: %s",
+  async (path) => {
+    const { result, requests } = await fixture(
+      [path],
+      {},
+      undefined,
+      undefined,
+      undefined,
+      false,
+      path,
+    );
+    expect(result.retrieval?.changedHunksCovered).toBe(true);
+    expect(
+      result.citations?.some((c) => c.path === path && c.content.includes("source evidence")),
+    ).toBe(true);
+    const input = requests.at(-1)?.input as {
+      repository: { toolResults: Array<{ tool: string; path: string; content?: string }> };
+    };
+    expect(
+      input.repository.toolResults.some(
+        (r) =>
+          r.tool === "read_change" && r.path === path && r.content?.includes("source evidence"),
+      ),
+    ).toBe(true);
+  },
+);
