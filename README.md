@@ -230,11 +230,14 @@ follows repository symlinks, or sends provider credentials into the adversary pr
 
 For changed-file reviews, a planner that stops without reading source is recovered inside
 the same retrieval session. The SDK reads up to eight changed files per recovery round
-(up to 200 lines each, near a retrieved patch hunk when available), then resumes planning.
+after retrieving their patches, then reads source windows covering every in-scope head hunk
+(up to 200 lines each) and resumes planning.
 These reads use the same exclusions, filesystem checks, and remaining budgets as ordinary
 model-selected operations. Identical failed reads are not repeated. The optional
 `review.retrieval.sourceReadRecoveries` counter records recovery rounds. Unavailable or
 excluded source remains an explicit gap; recovery never manufactures citations or a clean verdict.
+A recovered session cannot finish until its changed hunks are covered. Missing, truncated,
+or unavailable patches, and budgets exhausted partway through source reads, remain incomplete.
 
 Declare `permissions.model: true` in `adversary.yaml`. The adversary process receives only a
 short-lived authenticated loopback broker endpoint. Provider credentials, provider selection,

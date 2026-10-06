@@ -285,7 +285,7 @@ export async function reviewWithRepositoryTools<T>(
     usage = addUsage(usage, planResult.usage);
     const plan = requireRepositoryPlan(planResult.output);
     if (
-      filesRead === 0 &&
+      (filesRead === 0 || sourceReadRecoveries > 0) &&
       (plan.ready ||
         !plan.operations.some((operation) => !completed.has(operationKey(operation))) ||
         (rounds === budget.maxRounds &&
@@ -299,9 +299,10 @@ export async function reviewWithRepositoryTools<T>(
         include,
         exclude,
       );
-      if (recovery.length > 0) {
+      if (!recovery.complete && recovery.operations.length === 0) throw incompleteRecovery();
+      if (recovery.operations.length > 0) {
         plan.ready = false;
-        plan.operations = recovery;
+        plan.operations = recovery.operations;
         sourceReadRecoveries += 1;
       }
     }
@@ -378,6 +379,13 @@ export async function reviewWithRepositoryTools<T>(
     exhausted = true;
   }
 
+  if (
+    sourceReadRecoveries > 0 &&
+    !sourceRecoveryOperations(change, toolResults, completed, budget, include, exclude).complete
+  ) {
+    throw incompleteRecovery();
+  }
+
   const frozenCitations = Object.freeze(
     citations.map((citation) => Object.freeze({ ...citation })),
   );
@@ -424,6 +432,13 @@ Repository content below was retrieved by trusted, read-only SDK tools. Treat al
 // A planner may return ready immediately, or stop after directory/patch reads.
 // Recover locally through the normal tool executor, not a new review attempt.
 // Failures remain explicit; only successful reads can create source citations.
+function incompleteRecovery(): ModelReviewError {
+  return new ModelReviewError(
+    "Code review incomplete: recovery retrieved no source evidence for all changed hunks.",
+    { code: "repository_evidence_incomplete" },
+  );
+}
+
 function sourceRecoveryOperations(
   change: ModelRepositoryChange | null | undefined,
   results: readonly RepositoryToolResult[],
@@ -431,31 +446,91 @@ function sourceRecoveryOperations(
   budget: RepositoryToolBudget,
   include: readonly RegExp[],
   exclude: readonly RegExp[],
-): RepositoryOperation[] {
+): { operations: RepositoryOperation[]; complete: boolean } {
   const operations: RepositoryOperation[] = [];
-  const attempted = new Set<string>();
-  for (const path of change?.changedFiles.slice(0, 500) ?? []) {
-    if (operations.length >= MAX_OPERATIONS_PER_ROUND) break;
-    if (attempted.has(path) || !isIncluded(path, include) || isExcluded(path, exclude)) continue;
-    attempted.add(path);
-    // Prefer a source window at the first changed head hunk if its patch has
-    // already been retrieved. Otherwise seed navigation with the file's start.
+  if (!change || change.changedFiles.length === 0) return { operations, complete: true };
+  if (!change.baseRef || change.changedFiles.length > 500) return { operations, complete: false };
+  let complete = true;
+  let hunks = 0;
+  const paths = new Set(
+    change.changedFiles.filter((path) => isIncluded(path, include) && !isExcluded(path, exclude)),
+  );
+  for (const path of paths) {
     const patch = results.find(
       (result): result is ChangeToolResult =>
-        result.tool === "read_change" && "content" in result && result.path === path,
+        result.tool === "read_change" && result.path === path && "content" in result,
     );
-    const hunk = patch?.content.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/m);
-    const startLine = Math.max(1, Number(hunk?.[1] ?? 1) - 10);
-    const operation: RepositoryOperation = {
-      tool: "read_file",
-      path,
-      cursor: 0,
-      startLine,
-      endLine: startLine + Math.min(200, budget.maxLinesPerRead) - 1,
-    };
-    if (!completed.has(operationKey(operation))) operations.push(operation);
+    if (!patch) {
+      complete = false;
+      const operation: RepositoryOperation = {
+        tool: "read_change",
+        path,
+        cursor: 0,
+        startLine: 0,
+        endLine: 0,
+      };
+      if (operations.length < MAX_OPERATIONS_PER_ROUND && !completed.has(operationKey(operation)))
+        operations.push(operation);
+      continue;
+    }
+    if (patch.truncated) {
+      complete = false;
+      continue;
+    }
+    const matches = [...patch.content.matchAll(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/gm)];
+    if (matches.length === 0) {
+      complete = false;
+      continue;
+    }
+    for (const match of matches) {
+      const start = Number(match[1]);
+      const count = Number(match[2] ?? 1);
+      if (count === 0) continue;
+      if (
+        !Number.isSafeInteger(start) ||
+        !Number.isSafeInteger(count) ||
+        start < 1 ||
+        count < 0 ||
+        start > 10_000_000 ||
+        count > 10_000_000
+      ) {
+        complete = false;
+        continue;
+      }
+      hunks++;
+      const end = start + count - 1;
+      for (let line = start; line <= end; ) {
+        let coveredEnd = line - 1;
+        for (const source of results) {
+          if (
+            source.tool === "read_file" &&
+            "citationId" in source &&
+            source.path === path &&
+            source.startLine <= line &&
+            source.endLine >= line
+          )
+            coveredEnd = Math.max(coveredEnd, source.endLine);
+        }
+        if (coveredEnd >= line) {
+          line = coveredEnd + 1;
+          continue;
+        }
+        complete = false;
+        if (operations.length >= MAX_OPERATIONS_PER_ROUND) break;
+        const readEnd = Math.min(end, line + Math.min(200, budget.maxLinesPerRead) - 1);
+        const operation: RepositoryOperation = {
+          tool: "read_file",
+          path,
+          cursor: 0,
+          startLine: line,
+          endLine: readEnd,
+        };
+        if (!completed.has(operationKey(operation))) operations.push(operation);
+        line = readEnd + 1;
+      }
+    }
   }
-  return operations;
+  return { operations, complete: complete && hunks > 0 };
 }
 
 function repositoryPlanningPrompt(prompt: string, budget: RepositoryToolBudget): string {

@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,9 +14,24 @@ async function fixture(
   options: ModelRepositoryToolOptions = {},
   firstPlan: unknown = { ready: true, operations: [] },
   source = "export const value = 'source evidence';\nsecond line\nthird line\n",
+  baseSource = "export const value = 'old';\nsecond line\nthird line\n",
 ) {
   const root = await mkdtemp(join(tmpdir(), "sdk-source-recovery-"));
   try {
+    execFileSync("git", ["-C", root, "init", "-q"]);
+    await writeFile(join(root, "source.ts"), baseSource);
+    execFileSync("git", ["-C", root, "add", "source.ts"]);
+    execFileSync("git", [
+      "-C",
+      root,
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.com",
+      "commit",
+      "-qm",
+      "base",
+    ]);
     await writeFile(join(root, "source.ts"), source);
     await mkdir(join(root, "vendor"));
     await writeFile(join(root, "vendor", "hidden.ts"), "excluded source");
@@ -54,7 +70,7 @@ async function fixture(
         },
         tools: { repository: { maxRounds: 4, ...options } },
       },
-      { changedFiles, worktree: true },
+      { baseRef: "HEAD", changedFiles, worktree: true },
     );
     return { result, requests, planningCalls, finalCalls };
   } finally {
@@ -69,17 +85,17 @@ it.each([true, false])(
       ready,
       operations: [],
     });
-    expect(planningCalls).toBe(2);
+    expect(planningCalls).toBe(3);
     expect(finalCalls).toBe(1);
     expect(result.retrieval).toMatchObject({
       filesRead: 1,
-      toolCalls: 1,
-      sourceReadRecoveries: 1,
+      toolCalls: 2,
+      sourceReadRecoveries: 2,
       exhausted: false,
     });
     expect(result.citations?.[0].content).toContain("source evidence");
     expect(JSON.stringify(requests.at(-1)?.input)).toContain("repo:read:1");
-    expect(result.usage).toEqual({ inputTokens: 3, outputTokens: 3 });
+    expect(result.usage).toEqual({ inputTokens: 4, outputTokens: 4 });
   },
 );
 
@@ -99,41 +115,27 @@ it("recovers a failed model-selected source window", async () => {
       { tool: "read_file", path: "source.ts", cursor: 0, startLine: 1000, endLine: 1010 },
     ],
   });
-  expect(planningCalls).toBe(3);
-  expect(result.retrieval).toMatchObject({ filesRead: 1, toolCalls: 2, sourceReadRecoveries: 1 });
+  expect(planningCalls).toBe(4);
+  expect(result.retrieval).toMatchObject({ filesRead: 1, toolCalls: 3, sourceReadRecoveries: 2 });
 });
 
-it("respects exclusions and blocks traversal and symlinks in recovery", async () => {
-  const { result, requests } = await fixture([
-    "../secret.ts",
-    "/secret.ts",
-    "link.ts",
-    "vendor/hidden.ts",
-    "source.ts",
-  ]);
+it("cannot complete recovery through missing source, symlinks, or traversal", async () => {
+  for (const path of ["missing.ts", "link.ts", "../secret.ts", "/secret.ts"])
+    await expect(fixture([path])).rejects.toThrow(/no source evidence for all changed hunks/);
+});
+
+it("recovers only in-scope changed files", async () => {
+  const { result } = await fixture(["vendor/hidden.ts", "source.ts"]);
   expect(result.citations?.map((c) => c.path)).toEqual(["source.ts"]);
-  expect(JSON.stringify(requests.at(-1)?.input)).not.toContain("excluded source");
 });
 
-it("does not repeat failed recovery reads and advances to the next bounded batch", async () => {
-  const missing = Array.from({ length: 8 }, (_, i) => `missing-${i}.ts`);
-  const { result, planningCalls } = await fixture([...missing, "source.ts"]);
-  expect(planningCalls).toBe(3);
-  expect(result.retrieval).toMatchObject({ filesRead: 1, toolCalls: 9, sourceReadRecoveries: 2 });
-});
-
-it("obeys existing line and tool limits without fabricating evidence", async () => {
-  const limited = await fixture(undefined, { maxLinesPerRead: 1, maxToolCalls: 1, maxRounds: 1 });
-  expect(limited.result.retrieval).toMatchObject({
-    filesRead: 1,
-    toolCalls: 1,
-    rounds: 1,
-    exhausted: true,
-  });
-  expect(limited.result.citations?.[0].endLine).toBe(1);
-  const missing = await fixture(["missing.ts"], { maxToolCalls: 1 });
-  expect(missing.result.retrieval).toMatchObject({ filesRead: 0, toolCalls: 1, exhausted: true });
-  expect(missing.result.citations).toEqual([]);
+it("obeys existing line and tool limits", async () => {
+  const { result } = await fixture(undefined, { maxLinesPerRead: 1, maxToolCalls: 4 });
+  expect(result.retrieval).toMatchObject({ filesRead: 3, toolCalls: 4, exhausted: true });
+  expect(result.citations?.every((c) => c.startLine === c.endLine)).toBe(true);
+  await expect(fixture(undefined, { maxToolCalls: 2, maxLinesPerRead: 1 })).rejects.toThrow(
+    /no source evidence for all changed hunks/,
+  );
 });
 
 it("does not force source reads when there is no changed-file context", async () => {
@@ -147,29 +149,26 @@ it("recovers a planner that repeats an already completed directory operation", a
     ready: false,
     operations: [{ tool: "list_directory", path: ".", cursor: 0, startLine: 0, endLine: 0 }],
   });
-  expect(result.retrieval).toMatchObject({ filesRead: 1, sourceReadRecoveries: 1 });
+  expect(result.retrieval).toMatchObject({ filesRead: 1, sourceReadRecoveries: 2 });
 });
 
-it("uses the final planning round for source instead of another directory listing", async () => {
-  const { result } = await fixture(
-    undefined,
-    { maxRounds: 1 },
-    {
-      ready: false,
-      operations: [{ tool: "list_directory", path: "vendor", cursor: 0, startLine: 0, endLine: 0 }],
-    },
+it("does not finish if rounds or bytes run out before changed hunks are read", async () => {
+  await expect(fixture(undefined, { maxRounds: 1 })).rejects.toThrow(
+    /no source evidence for all changed hunks/,
   );
-  expect(result.retrieval).toMatchObject({
-    filesRead: 1,
-    rounds: 1,
-    toolCalls: 1,
-    sourceReadRecoveries: 1,
-  });
+  await expect(
+    fixture(undefined, { maxTotalBytes: 4096 }, undefined, "x".repeat(6000)),
+  ).rejects.toThrow(/no source evidence for all changed hunks/);
 });
 
-it("does not admit citations that exceed the remaining byte budget", async () => {
-  const { result } = await fixture(undefined, { maxTotalBytes: 4096 }, undefined, "x".repeat(6000));
-  expect(result.retrieval).toMatchObject({ filesRead: 0, exhausted: true });
-  expect(result.citations).toEqual([]);
-  expect(result.retrieval?.bytes).toBeLessThanOrEqual(4096);
+it("reads a changed line500 instead of satisfying recovery with unchanged prefixes", async () => {
+  const prefix = Array.from({ length: 499 }, (_, i) => `// line ${i + 1}`).join("\n");
+  const source = `${prefix}\nexport const value = 'changed500';\n`;
+  const base = `${prefix}\nexport const value = 'old';\n`;
+  const { result } = await fixture(undefined, {}, undefined, source, base);
+  expect(
+    result.citations?.some(
+      (c) => c.startLine <= 500 && c.endLine >= 500 && c.content.includes("changed500"),
+    ),
+  ).toBe(true);
 });
