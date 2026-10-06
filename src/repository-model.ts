@@ -77,6 +77,8 @@ export interface ModelRepositoryRetrieval {
   exhausted: boolean;
   /** Planning rounds recovered by reading changed source before accepting ready. */
   sourceReadRecoveries?: number;
+  /** All in-scope head hunks are covered, or patches have no head text hunks. */
+  changedHunksCovered?: boolean;
 }
 
 export interface ModelRepositoryChange {
@@ -285,11 +287,10 @@ export async function reviewWithRepositoryTools<T>(
     usage = addUsage(usage, planResult.usage);
     const plan = requireRepositoryPlan(planResult.output);
     if (
-      (filesRead === 0 || sourceReadRecoveries > 0) &&
-      (plan.ready ||
-        !plan.operations.some((operation) => !completed.has(operationKey(operation))) ||
-        (rounds === budget.maxRounds &&
-          !plan.operations.some((operation) => operation.tool === "read_file")))
+      plan.ready ||
+      !plan.operations.some((operation) => !completed.has(operationKey(operation))) ||
+      (rounds === budget.maxRounds &&
+        !plan.operations.some((operation) => operation.tool === "read_file"))
     ) {
       const recovery = sourceRecoveryOperations(
         change,
@@ -379,12 +380,16 @@ export async function reviewWithRepositoryTools<T>(
     exhausted = true;
   }
 
-  if (
-    sourceReadRecoveries > 0 &&
-    !sourceRecoveryOperations(change, toolResults, completed, budget, include, exclude).complete
-  ) {
+  const changedCoverage = sourceRecoveryOperations(
+    change,
+    toolResults,
+    completed,
+    budget,
+    include,
+    exclude,
+  );
+  if (change && change.changedFiles.length > 0 && !changedCoverage.complete)
     throw incompleteRecovery();
-  }
 
   const frozenCitations = Object.freeze(
     citations.map((citation) => Object.freeze({ ...citation })),
@@ -397,6 +402,9 @@ export async function reviewWithRepositoryTools<T>(
     directoriesListed,
     exhausted,
     ...(sourceReadRecoveries === 0 ? {} : { sourceReadRecoveries }),
+    ...(change && change.changedFiles.length > 0 && changedCoverage.complete
+      ? { changedHunksCovered: true }
+      : {}),
   };
   const finalResult = await reviewWithValidation<T>(
     model,
@@ -451,7 +459,7 @@ function sourceRecoveryOperations(
   if (!change || change.changedFiles.length === 0) return { operations, complete: true };
   if (!change.baseRef || change.changedFiles.length > 500) return { operations, complete: false };
   let complete = true;
-  let hunks = 0;
+  let availablePatches = 0;
   const paths = new Set(
     change.changedFiles.filter((path) => isIncluded(path, include) && !isExcluded(path, exclude)),
   );
@@ -477,9 +485,10 @@ function sourceRecoveryOperations(
       complete = false;
       continue;
     }
+    availablePatches++;
     const matches = [...patch.content.matchAll(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/gm)];
     if (matches.length === 0) {
-      complete = false;
+      if (!isMetadataOnlyPatch(patch.content)) complete = false;
       continue;
     }
     for (const match of matches) {
@@ -497,7 +506,6 @@ function sourceRecoveryOperations(
         complete = false;
         continue;
       }
-      hunks++;
       const end = start + count - 1;
       for (let line = start; line <= end; ) {
         let coveredEnd = line - 1;
@@ -530,7 +538,17 @@ function sourceRecoveryOperations(
       }
     }
   }
-  return { operations, complete: complete && hunks > 0 };
+  return { operations, complete: complete && availablePatches > 0 };
+}
+
+function isMetadataOnlyPatch(content: string): boolean {
+  return (
+    content.startsWith("diff --git ") &&
+    !content.includes("\n@@") &&
+    /^(?:old mode \d+\nnew mode \d+|rename from .+\nrename to .+|Binary files .+ differ|GIT binary patch|(?:new file mode|deleted file mode) \d+)/m.test(
+      content,
+    )
+  );
 }
 
 function repositoryPlanningPrompt(prompt: string, budget: RepositoryToolBudget): string {

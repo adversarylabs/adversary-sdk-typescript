@@ -1033,3 +1033,9 @@ direnv allow
 ```
 
 The Nix flake provides Node 22 and npm.
+
+Recovery checks changed-hunk coverage even when the planner already has unrelated
+citations. Rename, mode, binary, and empty-file metadata patches have no head text
+hunks to read; their retrieved patch evidence satisfies that requirement. The SDK
+records `changedHunksCovered: true` only after this deterministic check succeeds.
+Missing, malformed, and truncated patch evidence still prevents completion.

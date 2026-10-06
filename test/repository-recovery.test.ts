@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
@@ -15,6 +15,7 @@ async function fixture(
   firstPlan: unknown = { ready: true, operations: [] },
   source = "export const value = 'source evidence';\nsecond line\nthird line\n",
   baseSource = "export const value = 'old';\nsecond line\nthird line\n",
+  modeOnly = false,
 ) {
   const root = await mkdtemp(join(tmpdir(), "sdk-source-recovery-"));
   try {
@@ -33,6 +34,7 @@ async function fixture(
       "base",
     ]);
     await writeFile(join(root, "source.ts"), source);
+    if (modeOnly) await chmod(join(root, "source.ts"), 0o755);
     await mkdir(join(root, "vendor"));
     await writeFile(join(root, "vendor", "hidden.ts"), "excluded source");
     await symlink(join(root, "source.ts"), join(root, "link.ts"));
@@ -99,13 +101,16 @@ it.each([true, false])(
   },
 );
 
-it("leaves successful source plans alone", async () => {
+it("leaves fully covered source plans alone", async () => {
   const { result } = await fixture(undefined, undefined, {
     ready: false,
-    operations: [{ tool: "read_file", path: "source.ts", cursor: 0, startLine: 2, endLine: 2 }],
+    operations: [
+      { tool: "read_change", path: "source.ts", cursor: 0, startLine: 0, endLine: 0 },
+      { tool: "read_file", path: "source.ts", cursor: 0, startLine: 1, endLine: 3 },
+    ],
   });
   expect(result.retrieval?.sourceReadRecoveries).toBeUndefined();
-  expect(result.citations?.[0].content).toBe("second line");
+  expect(result.citations?.[0].content).toContain("second line");
 });
 
 it("recovers a failed model-selected source window", async () => {
@@ -171,4 +176,32 @@ it("reads a changed line500 instead of satisfying recovery with unchanged prefix
       (c) => c.startLine <= 500 && c.endLine >= 500 && c.content.includes("changed500"),
     ),
   ).toBe(true);
+});
+
+it("unrelated prefix citations cannot bypass patch or changed-line recovery", async () => {
+  const prefix = "// unchanged\n".repeat(499);
+  const { result } = await fixture(
+    undefined,
+    {},
+    {
+      ready: false,
+      operations: [{ tool: "read_file", path: "source.ts", cursor: 0, startLine: 1, endLine: 200 }],
+    },
+    `${prefix}changed500\n`,
+    `${prefix}old500\n`,
+  );
+  expect(result.retrieval?.sourceReadRecoveries).toBeGreaterThan(0);
+  expect(
+    result.citations?.some(
+      (c) => c.startLine <= 500 && c.endLine >= 500 && c.content.includes("changed500"),
+    ),
+  ).toBe(true);
+});
+
+it("mode-only and binary patches complete without nonexistent text reads", async () => {
+  const text = "export const value = 0;\n";
+  const mode = await fixture(undefined, {}, undefined, text, text, true);
+  expect(mode.result.retrieval).toMatchObject({ filesRead: 0, changedHunksCovered: true });
+  const binary = await fixture(undefined, {}, undefined, "\0new", "\0old");
+  expect(binary.result.retrieval).toMatchObject({ filesRead: 0, changedHunksCovered: true });
 });
