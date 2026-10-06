@@ -1,0 +1,31 @@
+src/repository-model.ts
+  s_effac2b4965c4d::t_77755fbef676b3 78-79,239,299-307,391,405,424-432,434-439,444-446,451-455
+  s_effac2b4965c4d::t_bac61a66ad826b 287-298,433,440-443,447-450
+  s_effac2b4965c4d::t_ad030f9226f849 456-460
+README.md
+  s_effac2b4965c4d::t_a0f91d8103c611 231-238
+test/repository-recovery.test.ts
+  s_effac2b4965c4d::t_159aa1552d6f89 2-5,10-17,22-34,43-45,61-66,87-88,93-97,104-108,117-128,135-144,166
+  s_effac2b4965c4d::t_96ebb92ac9e706 1,6-9,18-21,35-42,46-60,67-86,89-92,98-103,109-116,129-134,145-165
+  s_effac2b4965c4d::t_77db510496e425 167-175
+package-lock.json
+  s_effac2b4965c4d::t_3c45f4579b0d4d 3,9
+package.json
+  s_effac2b4965c4d::t_21b7ef53e59006 3
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "88b020279c5cea416179800396653a33e53e41e7",
+  "prompts": {},
+  "sessions": {
+    "s_effac2b4965c4d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0eed2-c799-7e31-b5ad-bcffd20e23c8",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Marc Campbell <marc.e.campbell@gmail.com>"
+    }
+  }
+}
