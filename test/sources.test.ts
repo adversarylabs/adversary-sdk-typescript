@@ -77,3 +77,21 @@ describe("in-scope sources", () => {
     expect(byPath["pkg/weak/tls.go"]).toBe("repository");
   });
 });
+
+it("does not classify a folder named vendor as dependencies", async () => {
+  const root = await fixtureRepo();
+  await mkdir(join(root, "docs", "vendor"), { recursive: true });
+  await writeFile(join(root, "docs", "vendor", "guide.md"), "# Vendor guide\n");
+  for (const scanMode of ["changed", "all"] as const) {
+    const sources = await loadInScopeSources(root, {
+      scanMode,
+      changedFiles: ["docs/vendor/guide.md"],
+    });
+    expect(
+      sources.some((s) => s.path === "docs/vendor/guide.md" && s.content.includes("Vendor guide")),
+    ).toBe(true);
+  }
+  expect(await listInScopePaths(root, null, { ignoreDirectories: ["vendor"] })).not.toContain(
+    "docs/vendor/guide.md",
+  );
+});

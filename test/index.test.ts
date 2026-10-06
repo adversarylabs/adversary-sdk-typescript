@@ -111,6 +111,18 @@ describe("input loading", () => {
     );
   });
 
+  it("rejects changed files without a base revision at parse time", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "adversary-sdk-"));
+    const inputPath = join(directory, "input.json");
+    await writeFile(
+      inputPath,
+      JSON.stringify({ source: { path: "/repo" }, change: { changed_files: ["source.ts"] } }),
+    );
+    await expect(parseInput(inputPath)).rejects.toThrow(
+      "change.base_ref is required for changed files",
+    );
+  });
+
   it("rejects an unsupported scan mode", async () => {
     const directory = await mkdtemp(join(tmpdir(), "adversary-sdk-"));
     const inputPath = join(directory, "input.json");

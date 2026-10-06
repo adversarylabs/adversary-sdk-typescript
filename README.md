@@ -228,6 +228,17 @@ results under `repository.toolResults`. Final output schemas should cite the sup
 `citationId` and a line inside its inclusive range. The SDK never exposes arbitrary shell tools,
 follows repository symlinks, or sends provider credentials into the adversary process.
 
+For changed-file reviews, a planner that stops without reading source is recovered inside
+the same retrieval session. The SDK reads up to eight changed files per recovery round
+after retrieving their patches, then reads source windows covering every in-scope head hunk
+(up to 200 lines each) and resumes planning.
+These reads use the same exclusions, filesystem checks, and remaining budgets as ordinary
+model-selected operations. Identical failed reads are not repeated. The optional
+`review.retrieval.sourceReadRecoveries` counter records recovery rounds. Unavailable or
+excluded source remains an explicit gap; recovery never manufactures citations or a clean verdict.
+A recovered session cannot finish until its changed hunks are covered. Missing, truncated,
+or unavailable patches, and budgets exhausted partway through source reads, remain incomplete.
+
 Declare `permissions.model: true` in `adversary.yaml`. The adversary process receives only a
 short-lived authenticated loopback broker endpoint. Provider credentials, provider selection,
 network transport, retries, and provider-specific response handling remain owned by the CLI.
@@ -1022,3 +1033,30 @@ direnv allow
 ```
 
 The Nix flake provides Node 22 and npm.
+
+Recovery checks changed-hunk coverage even when the planner already has unrelated
+citations. Rename, mode, binary, and empty-file metadata patches have no head text
+hunks to read; their retrieved patch evidence satisfies that requirement. The SDK
+records `changedHunksCovered: true` only after this deterministic check succeeds.
+Missing, malformed, and truncated patch evidence still prevents completion.
+
+### Changed-source recovery limits and diagnostics
+
+Repository-tool reviews require a base revision when in-scope changed files need
+coverage. Runtime changed-file inputs without `change.base_ref` fail during parsing;
+direct model-tool callers receive `invalid_model_request` before planning starts.
+Changes with no in-scope files need no recovery reads.
+
+The change summary is bounded to the first 500 entries. For larger changes,
+`retrieval.omittedChangedFiles` records the omitted count and
+`changedHunksCovered` is not asserted. The same gap is included in the model's
+change summary; source coverage is enforced for the in-scope summarized files
+within the existing retrieval budgets. Untracked worktree files use a read-only
+new-file diff and do not modify the Git index.
+
+When coverage cannot be completed, `ModelReviewError.diagnostics` and a JSON event
+on stderr identify the `repository_evidence_recovery` stage, job ID when available,
+adversary name for rule-context model calls, retrieval-call counts, hunk and source
+counts, and explicit failure reasons. Paths, prompts, source content, and raw tool
+errors are excluded. Direct model-tool callers may pass reviewer identity as the
+optional final argument to `reviewWithRepositoryTools`.

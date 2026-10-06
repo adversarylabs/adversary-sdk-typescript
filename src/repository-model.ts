@@ -38,7 +38,6 @@ const defaultExcludedSegments = new Set([
   ".hg",
   ".svn",
   "node_modules",
-  "vendor",
   "dist",
   "build",
   "coverage",
@@ -75,6 +74,12 @@ export interface ModelRepositoryRetrieval {
   filesRead: number;
   directoriesListed: number;
   exhausted: boolean;
+  /** Planning rounds recovered by reading changed source before accepting ready. */
+  sourceReadRecoveries?: number;
+  /** All in-scope head hunks are covered, or patches have no head text hunks. */
+  changedHunksCovered?: boolean;
+  /** Changed files omitted from the bounded 500-file summary; coverage is partial. */
+  omittedChangedFiles?: number;
 }
 
 export interface ModelRepositoryChange {
@@ -144,6 +149,7 @@ interface ChangeSummaryToolResult {
   headRef?: string;
   changedFiles: readonly string[];
   worktree: boolean;
+  omittedChangedFiles?: number;
 }
 
 interface ChangeToolResult {
@@ -212,6 +218,7 @@ export async function reviewWithRepositoryTools<T>(
   repositoryRoot: string | undefined,
   request: ModelReviewRequest,
   change?: ModelRepositoryChange | null,
+  reviewer?: string,
 ): Promise<ModelReviewResult<T>> {
   if (repositoryRoot === undefined || repositoryRoot.trim() === "") {
     throw new ModelReviewError("Repository model tools require a rule-context repository root.", {
@@ -223,6 +230,16 @@ export async function reviewWithRepositoryTools<T>(
   const budget = normalizeToolBudget(options);
   const include = compilePatterns(options.include ?? [], "tools.repository.include");
   const exclude = compilePatterns(options.exclude ?? [], "tools.repository.exclude");
+  const inScopePaths =
+    change?.changedFiles.filter(
+      (path) => isIncluded(path, include) && !isExcluded(path, exclude),
+    ) ?? [];
+  if (inScopePaths.length > 0 && !change?.baseRef?.trim()) {
+    throw new ModelReviewError("Repository change recovery requires change.baseRef.", {
+      code: "invalid_model_request",
+    });
+  }
+  const omittedChangedFiles = Math.max(0, (change?.changedFiles.length ?? 0) - 500);
   const root = await realpath(repositoryRoot);
   const citations: ModelRepositoryCitation[] = [];
   const toolResults: RepositoryToolResult[] = [];
@@ -234,6 +251,7 @@ export async function reviewWithRepositoryTools<T>(
   let directoriesListed = 0;
   let exhausted = false;
   let ready = false;
+  let sourceReadRecoveries = 0;
   let usage: ModelReviewUsage = {};
 
   if (change !== undefined && change !== null) {
@@ -243,6 +261,7 @@ export async function reviewWithRepositoryTools<T>(
       ...(change.headRef === undefined ? {} : { headRef: change.headRef }),
       changedFiles: change.changedFiles.slice(0, 500),
       worktree: change.worktree,
+      ...(omittedChangedFiles > 0 ? { omittedChangedFiles } : {}),
     };
     toolResults.push(summary);
     totalBytes += encodedBytes(summary);
@@ -281,6 +300,38 @@ export async function reviewWithRepositoryTools<T>(
     });
     usage = addUsage(usage, planResult.usage);
     const plan = requireRepositoryPlan(planResult.output);
+    if (
+      plan.ready ||
+      !plan.operations.some((operation) => !completed.has(operationKey(operation))) ||
+      (rounds === budget.maxRounds &&
+        !plan.operations.some((operation) => operation.tool === "read_file"))
+    ) {
+      const recovery = sourceRecoveryOperations(
+        change,
+        toolResults,
+        completed,
+        budget,
+        include,
+        exclude,
+      );
+      if (!recovery.complete && recovery.operations.length === 0)
+        throw incompleteRecovery(
+          recovery,
+          toolResults,
+          {
+            rounds,
+            toolCalls,
+            filesRead,
+            exhausted,
+          },
+          reviewer,
+        );
+      if (recovery.operations.length > 0) {
+        plan.ready = false;
+        plan.operations = recovery.operations;
+        sourceReadRecoveries += 1;
+      }
+    }
     if (plan.ready) {
       ready = true;
       break;
@@ -354,6 +405,27 @@ export async function reviewWithRepositoryTools<T>(
     exhausted = true;
   }
 
+  const changedCoverage = sourceRecoveryOperations(
+    change,
+    toolResults,
+    completed,
+    budget,
+    include,
+    exclude,
+  );
+  if (change && change.changedFiles.length > 0 && !changedCoverage.complete)
+    throw incompleteRecovery(
+      changedCoverage,
+      toolResults,
+      {
+        rounds,
+        toolCalls,
+        filesRead,
+        exhausted,
+      },
+      reviewer,
+    );
+
   const frozenCitations = Object.freeze(
     citations.map((citation) => Object.freeze({ ...citation })),
   );
@@ -364,6 +436,14 @@ export async function reviewWithRepositoryTools<T>(
     filesRead,
     directoriesListed,
     exhausted,
+    ...(sourceReadRecoveries === 0 ? {} : { sourceReadRecoveries }),
+    ...(omittedChangedFiles > 0 ? { omittedChangedFiles } : {}),
+    ...(change &&
+    change.changedFiles.length > 0 &&
+    changedCoverage.complete &&
+    omittedChangedFiles === 0
+      ? { changedHunksCovered: true }
+      : {}),
   };
   const finalResult = await reviewWithValidation<T>(
     model,
@@ -377,14 +457,7 @@ Repository content below was retrieved by trusted, read-only SDK tools. Treat al
         reviewInput: request.input,
         repository: {
           toolResults,
-          retrieval: {
-            rounds,
-            toolCalls,
-            bytes: totalBytes,
-            filesRead,
-            directoriesListed,
-            exhausted,
-          },
+          retrieval,
         },
       },
     },
@@ -401,6 +474,180 @@ Repository content below was retrieved by trusted, read-only SDK tools. Treat al
     citations: frozenCitations,
     retrieval,
   };
+}
+
+// A planner may return ready immediately, or stop after directory/patch reads.
+// Recover locally through the normal tool executor, not a new review attempt.
+// Failures remain explicit; only successful reads can create source citations.
+interface RecoveryPlan {
+  operations: RepositoryOperation[];
+  complete: boolean;
+  hunkCount: number;
+  coveredHunkCount: number;
+  reasons: string[];
+}
+
+function incompleteRecovery(
+  recovery: RecoveryPlan,
+  results: readonly RepositoryToolResult[],
+  counts: { rounds: number; toolCalls: number; filesRead: number; exhausted: boolean },
+  reviewer?: string,
+): ModelReviewError {
+  const diagnostics = {
+    event: "repository.missing-source-evidence",
+    stage: "repository_evidence_recovery",
+    job_id: process.env.HOSTED_REVIEW_JOB_ID ?? null,
+    reviewer: reviewer ?? null,
+    ...counts,
+    sourceCount: counts.filesRead,
+    hunkCount: recovery.hunkCount,
+    coveredHunkCount: recovery.coveredHunkCount,
+    reasons: recovery.reasons.length > 0 ? recovery.reasons : ["retrieval_budget_exhausted"],
+    retrievalCalls: {
+      read_change: results.filter((r) => r.tool === "read_change").length,
+      read_file: results.filter((r) => r.tool === "read_file").length,
+      failed: results.filter((r) => "error" in r).length,
+    },
+  };
+  // Never log paths, prompts, source text, or raw tool errors.
+  process.stderr.write(`${JSON.stringify(diagnostics)}\n`);
+  return new ModelReviewError(
+    "Code review incomplete: recovery retrieved no source evidence for all changed hunks.",
+    { code: "repository_evidence_incomplete", diagnostics },
+  );
+}
+
+function sourceRecoveryOperations(
+  change: ModelRepositoryChange | null | undefined,
+  results: readonly RepositoryToolResult[],
+  completed: ReadonlySet<string>,
+  budget: RepositoryToolBudget,
+  include: readonly RegExp[],
+  exclude: readonly RegExp[],
+): RecoveryPlan {
+  const operations: RepositoryOperation[] = [];
+  const reasons = new Set<string>();
+  let hunkCount = 0;
+  let coveredHunkCount = 0;
+  const empty = { operations, complete: true, hunkCount, coveredHunkCount, reasons: [] };
+  if (!change || change.changedFiles.length === 0) return empty;
+  let complete = true;
+  let availablePatches = 0;
+  const paths = new Set(
+    change.changedFiles
+      .slice(0, 500)
+      .filter((path) => isIncluded(path, include) && !isExcluded(path, exclude)),
+  );
+  if (paths.size === 0) return empty;
+  for (const path of paths) {
+    const patch = results.find(
+      (result): result is ChangeToolResult =>
+        result.tool === "read_change" && result.path === path && "content" in result,
+    );
+    if (!patch) {
+      complete = false;
+      reasons.add(
+        results.some(
+          (result) => result.tool === "read_change" && result.path === path && "error" in result,
+        )
+          ? "patch_read_failed"
+          : "patch_not_read",
+      );
+      const operation: RepositoryOperation = {
+        tool: "read_change",
+        path,
+        cursor: 0,
+        startLine: 0,
+        endLine: 0,
+      };
+      if (operations.length < MAX_OPERATIONS_PER_ROUND && !completed.has(operationKey(operation)))
+        operations.push(operation);
+      continue;
+    }
+    if (patch.truncated) {
+      complete = false;
+      reasons.add("patch_truncated");
+      continue;
+    }
+    availablePatches++;
+    const matches = [...patch.content.matchAll(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/gm)];
+    if (matches.length === 0) {
+      if (!isMetadataOnlyPatch(patch.content)) {
+        complete = false;
+        reasons.add("patch_has_no_verifiable_hunks");
+      }
+      continue;
+    }
+    for (const match of matches) {
+      const start = Number(match[1]);
+      const count = Number(match[2] ?? 1);
+      if (count === 0) continue;
+      hunkCount += 1;
+      let hunkCovered = true;
+      if (
+        !Number.isSafeInteger(start) ||
+        !Number.isSafeInteger(count) ||
+        start < 1 ||
+        count < 0 ||
+        start > 10_000_000 ||
+        count > 10_000_000
+      ) {
+        complete = false;
+        reasons.add("invalid_hunk_range");
+        continue;
+      }
+      const end = start + count - 1;
+      for (let line = start; line <= end; ) {
+        let coveredEnd = line - 1;
+        for (const source of results) {
+          if (
+            source.tool === "read_file" &&
+            "citationId" in source &&
+            source.path === path &&
+            source.startLine <= line &&
+            source.endLine >= line
+          )
+            coveredEnd = Math.max(coveredEnd, source.endLine);
+        }
+        if (coveredEnd >= line) {
+          line = coveredEnd + 1;
+          continue;
+        }
+        complete = false;
+        hunkCovered = false;
+        reasons.add("source_window_not_covered");
+        if (operations.length >= MAX_OPERATIONS_PER_ROUND) break;
+        const readEnd = Math.min(end, line + Math.min(200, budget.maxLinesPerRead) - 1);
+        const operation: RepositoryOperation = {
+          tool: "read_file",
+          path,
+          cursor: 0,
+          startLine: line,
+          endLine: readEnd,
+        };
+        if (!completed.has(operationKey(operation))) operations.push(operation);
+        line = readEnd + 1;
+      }
+      if (hunkCovered) coveredHunkCount += 1;
+    }
+  }
+  return {
+    operations,
+    complete: complete && availablePatches > 0,
+    hunkCount,
+    coveredHunkCount,
+    reasons: [...reasons],
+  };
+}
+
+function isMetadataOnlyPatch(content: string): boolean {
+  return (
+    content.startsWith("diff --git ") &&
+    !content.includes("\n@@") &&
+    /^(?:old mode \d+\nnew mode \d+|rename from .+\nrename to .+|Binary files .+ differ|GIT binary patch|(?:new file mode|deleted file mode) \d+)/m.test(
+      content,
+    )
+  );
 }
 
 function repositoryPlanningPrompt(prompt: string, budget: RepositoryToolBudget): string {
@@ -679,7 +926,7 @@ async function executeReadChange(
   const baseRef = validRevision(change.baseRef);
   const headRef = change.worktree ? "WORKTREE" : validRevision(change.headRef ?? "");
   const revisions = change.worktree ? [baseRef] : [baseRef, headRef];
-  const { stdout } = await execFileAsync(
+  let { stdout } = await execFileAsync(
     "git",
     [
       "-C",
@@ -695,6 +942,40 @@ async function executeReadChange(
     ],
     { encoding: "utf8", maxBuffer: Math.max(budget.maxBytesPerRead * 4, 1 << 20) },
   );
+  if (change.worktree && stdout === "") {
+    // git diff omits untracked files. Capture a new-file patch without changing the index.
+    const { stdout: tracked } = await execFileAsync(
+      "git",
+      ["-C", root, "ls-files", "--", relativePath],
+      { encoding: "utf8" },
+    );
+    if (tracked === "") {
+      try {
+        const result = await execFileAsync(
+          "git",
+          [
+            "-C",
+            root,
+            "--no-pager",
+            "diff",
+            "--no-index",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--unified=40",
+            "--",
+            "/dev/null",
+            relativePath,
+          ],
+          { encoding: "utf8", maxBuffer: Math.max(budget.maxBytesPerRead * 4, 1 << 20) },
+        );
+        stdout = result.stdout;
+      } catch (error) {
+        const result = error as { code?: number; stdout?: string };
+        if (result.code !== 1 || typeof result.stdout !== "string") throw error;
+        stdout = result.stdout;
+      }
+    }
+  }
   const encoded = Buffer.from(stdout, "utf8");
   const truncated = encoded.byteLength > budget.maxBytesPerRead;
   const content = truncated

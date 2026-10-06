@@ -775,6 +775,7 @@ export class Adversary {
       repoIndex,
       repoGraph,
       outcomeContext,
+      this.name,
     );
     const includeSuppressed = options.includeSuppressed;
 
@@ -944,6 +945,16 @@ function validateRuntimeChange(change: Record<string, unknown>, inputPath: strin
   ) {
     throw new Error(
       `Invalid input at ${inputPath}: change.changed_ranges must contain valid path/startLine/endLine ranges.`,
+    );
+  }
+  if (
+    (change.scan_mode ?? "changed") === "changed" &&
+    Array.isArray(changedFiles) &&
+    changedFiles.length > 0 &&
+    (typeof change.base_ref !== "string" || change.base_ref.trim() === "")
+  ) {
+    throw new Error(
+      `Invalid input at ${inputPath}: change.base_ref is required for changed files.`,
     );
   }
 }
@@ -1288,6 +1299,7 @@ function createRuleContext(
   repoIndex: RepoIndex | null,
   repoGraph: RepoGraph | null,
   outcomeContext: OutcomeContext | null,
+  reviewer: string,
 ): RuleContext {
   const absoluteRepoPath = resolve(repoPath);
 
@@ -1299,7 +1311,7 @@ function createRuleContext(
     repoGraph,
     summary,
     cache,
-    model: enhanceReviewModel(model, absoluteRepoPath, change),
+    model: enhanceReviewModel(model, absoluteRepoPath, change, reviewer),
     relpath(path: string): string {
       return relative(absoluteRepoPath, isAbsolute(path) ? path : resolve(absoluteRepoPath, path));
     },
@@ -2131,12 +2143,13 @@ export function enhanceReviewModel(
   model: ReviewModel,
   repositoryRoot?: string,
   change?: ChangeContext | null,
+  reviewer?: string,
 ): ContextualReviewModel {
   return {
     review: (request) =>
       request.tools?.repository === undefined
         ? reviewWithValidation(model, request)
-        : reviewWithRepositoryTools(model, repositoryRoot, request, change),
+        : reviewWithRepositoryTools(model, repositoryRoot, request, change, reviewer),
     concern: (request) => rewriteOpinionConcern(model, request),
   };
 }
