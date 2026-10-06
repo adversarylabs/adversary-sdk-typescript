@@ -14,7 +14,7 @@ import {
 } from "./model.js";
 
 const DEFAULT_MAX_ROUNDS = 6;
-const MAX_MAX_ROUNDS = 12;
+const MAX_MAX_ROUNDS = 16;
 const DEFAULT_MAX_TOOL_CALLS = 24;
 const MAX_MAX_TOOL_CALLS = 128;
 const DEFAULT_MAX_TOTAL_BYTES = 256 << 10;

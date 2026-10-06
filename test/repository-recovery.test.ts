@@ -339,3 +339,9 @@ it("emits stage diagnostics and exposes failure counts without source or prompt 
     log.mockRestore();
   }
 });
+
+it("accepts sixteen retrieval rounds but rejects an unbounded round budget", async () => {
+  const { result } = await fixture(undefined, { maxRounds: 16 });
+  expect(result.retrieval?.changedHunksCovered).toBe(true);
+  await expect(fixture(undefined, { maxRounds: 17 })).rejects.toThrow(/tools.repository.maxRounds/);
+});
