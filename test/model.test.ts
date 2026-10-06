@@ -573,7 +573,7 @@ describe("model review capability", () => {
         model,
       });
 
-      expect(planningCalls).toBe(3);
+      expect(planningCalls).toBe(1);
       expect(JSON.stringify(finalInput)).toContain("+  return 'broken';");
       expect(JSON.stringify(finalInput)).toContain("repo:read:1");
     } finally {

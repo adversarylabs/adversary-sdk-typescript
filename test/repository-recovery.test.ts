@@ -3,7 +3,7 @@ import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it, vi } from "vitest";
-import { ModelReviewError, type ModelReviewRequest, type ReviewModel } from "../src/model.js";
+import type { ModelReviewRequest, ReviewModel } from "../src/model.js";
 import {
   type ModelRepositoryToolOptions,
   reviewWithRepositoryTools,
@@ -19,6 +19,7 @@ async function fixture(
   sourcePath = "source.ts",
   baseRef: string | undefined = "HEAD",
   untracked = false,
+  deleted = false,
 ) {
   const root = await mkdtemp(join(tmpdir(), "sdk-source-recovery-"));
   try {
@@ -56,6 +57,7 @@ async function fixture(
         "remove source",
       ]);
     }
+    if (deleted) await rm(join(root, sourcePath));
     const indexBefore = execFileSync("git", ["-C", root, "ls-files", "--stage"], {
       encoding: "utf8",
     });
@@ -101,7 +103,7 @@ async function fixture(
     );
     return { result, requests, planningCalls, finalCalls };
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -112,7 +114,7 @@ it.each([true, false])(
       ready,
       operations: [],
     });
-    expect(planningCalls).toBe(3);
+    expect(planningCalls).toBe(1);
     expect(finalCalls).toBe(1);
     expect(result.retrieval).toMatchObject({
       filesRead: 1,
@@ -122,7 +124,7 @@ it.each([true, false])(
     });
     expect(result.citations?.[0].content).toContain("source evidence");
     expect(JSON.stringify(requests.at(-1)?.input)).toContain("repo:read:1");
-    expect(result.usage).toEqual({ inputTokens: 4, outputTokens: 4 });
+    expect(result.usage).toEqual({ inputTokens: 2, outputTokens: 2 });
   },
 );
 
@@ -134,7 +136,7 @@ it("leaves fully covered source plans alone", async () => {
       { tool: "read_file", path: "source.ts", cursor: 0, startLine: 1, endLine: 3 },
     ],
   });
-  expect(result.retrieval?.sourceReadRecoveries).toBeUndefined();
+  expect(result.retrieval?.sourceReadRecoveries).toBe(2);
   expect(result.citations?.[0].content).toContain("second line");
 });
 
@@ -145,13 +147,20 @@ it("recovers a failed model-selected source window", async () => {
       { tool: "read_file", path: "source.ts", cursor: 0, startLine: 1000, endLine: 1010 },
     ],
   });
-  expect(planningCalls).toBe(4);
+  expect(planningCalls).toBe(2);
   expect(result.retrieval).toMatchObject({ filesRead: 1, toolCalls: 3, sourceReadRecoveries: 2 });
 });
 
-it("cannot complete recovery through missing source, symlinks, or traversal", async () => {
-  for (const path of ["missing.ts", "link.ts", "../secret.ts", "/secret.ts"])
-    await expect(fixture([path])).rejects.toThrow(/no source evidence for all changed hunks/);
+it("keeps missing source, symlinks, and traversal as gaps without reading unsafe files", async () => {
+  for (const path of ["missing.ts", "link.ts", "../secret.ts", "/secret.ts"]) {
+    const { result, finalCalls } = await fixture([path]);
+    expect(finalCalls).toBe(1);
+    expect(result.citations).toEqual([]);
+    expect(result.retrieval).toMatchObject({
+      changedHunksCovered: false,
+      coverage: { status: "partial", reasons: ["patch_read_failed"] },
+    });
+  }
 });
 
 it("recovers only in-scope changed files", async () => {
@@ -165,9 +174,14 @@ it("obeys existing line and tool limits", async () => {
   const { result } = await fixture(undefined, { maxLinesPerRead: 1, maxToolCalls: 4 });
   expect(result.retrieval).toMatchObject({ filesRead: 3, toolCalls: 4, exhausted: true });
   expect(result.citations?.every((c) => c.startLine === c.endLine)).toBe(true);
-  await expect(fixture(undefined, { maxToolCalls: 2, maxLinesPerRead: 1 })).rejects.toThrow(
-    /no source evidence for all changed hunks/,
-  );
+  const partial = await fixture(undefined, { maxToolCalls: 2, maxLinesPerRead: 1 });
+  expect(partial.finalCalls).toBe(1);
+  expect(partial.result.citations).toHaveLength(1);
+  expect(partial.result.retrieval).toMatchObject({
+    exhausted: true,
+    changedHunksCovered: false,
+    coverage: { status: "partial" },
+  });
 });
 
 it("does not force source reads when there is no changed-file context", async () => {
@@ -184,13 +198,17 @@ it("recovers a planner that repeats an already completed directory operation", a
   expect(result.retrieval).toMatchObject({ filesRead: 1, sourceReadRecoveries: 2 });
 });
 
-it("does not finish if rounds or bytes run out before changed hunks are read", async () => {
-  await expect(fixture(undefined, { maxRounds: 1 })).rejects.toThrow(
-    /no source evidence for all changed hunks/,
-  );
-  await expect(
-    fixture(undefined, { maxTotalBytes: 4096 }, undefined, "x".repeat(6000)),
-  ).rejects.toThrow(/no source evidence for all changed hunks/);
+it("preloads changed evidence independently of planning rounds and preserves byte limits", async () => {
+  const complete = await fixture(undefined, { maxRounds: 1 });
+  expect(complete.result.retrieval?.changedHunksCovered).toBe(true);
+  const partial = await fixture(undefined, { maxTotalBytes: 4096 }, undefined, "x".repeat(6000));
+  expect(partial.finalCalls).toBe(1);
+  expect(partial.result.retrieval).toMatchObject({
+    changedHunksCovered: false,
+    exhausted: true,
+    coverage: { status: "partial" },
+  });
+  expect(partial.result.retrieval?.bytes).toBeLessThanOrEqual(4096);
 });
 
 it("reads a changed line500 instead of satisfying recovery with unchanged prefixes", async () => {
@@ -310,31 +328,26 @@ it("reports files outside the 500-file summary as a gap without claiming full co
     { include: ["**/*.ts"] },
   );
   expect(result.retrieval?.omittedChangedFiles).toBe(1);
-  expect(result.retrieval?.changedHunksCovered).toBeUndefined();
+  expect(result.retrieval?.changedHunksCovered).toBe(false);
   expect(JSON.stringify(requests.at(-1)?.input)).toContain('"omittedChangedFiles":1');
 });
 
-it("emits stage diagnostics and exposes failure counts without source or prompt content", async () => {
+it("reports nonfatal coverage diagnostics without source or prompt content", async () => {
   const log = vi.spyOn(process.stderr, "write").mockReturnValue(true);
   try {
-    await expect(fixture(undefined, { maxRounds: 1 })).rejects.toMatchObject({
-      diagnostics: {
-        stage: "repository_evidence_recovery",
-        hunkCount: 1,
-        coveredHunkCount: 0,
-        sourceCount: 0,
-        retrievalCalls: { read_change: 1, read_file: 0, failed: 0 },
-        reasons: ["source_window_not_covered"],
-      },
+    const { result, requests, finalCalls } = await fixture(undefined, { maxToolCalls: 1 });
+    expect(finalCalls).toBe(1);
+    expect(result.retrieval?.coverage).toMatchObject({
+      status: "partial",
+      hunkCount: 1,
+      coveredHunkCount: 0,
     });
-    expect(
-      log.mock.calls.some(([value]) => String(value).includes('"reviewer":"fixture-reviewer"')),
-    ).toBe(true);
+    expect(JSON.stringify(requests.at(-1)?.input)).toContain('"status":"partial"');
+    expect(requests.at(-1)?.prompt).toContain("never claim the entire change is clean");
     const output = log.mock.calls.map(([value]) => String(value)).join("");
     expect(output).toContain('"stage":"repository_evidence_recovery"');
-    expect(output).not.toContain("source evidence");
-    expect(output).not.toContain("Review the change");
-    expect(output).not.toContain("source.ts");
+    expect(output).toContain('"event":"repository.coverage-gap"');
+    expect(output).not.toMatch(/source evidence|Review the change|source\.ts/);
   } finally {
     log.mockRestore();
   }
@@ -346,35 +359,27 @@ it("accepts sixteen retrieval rounds but rejects an unbounded round budget", asy
   await expect(fixture(undefined, { maxRounds: 17 })).rejects.toThrow(/tools.repository.maxRounds/);
 });
 
-it("identifies the recovery stage when the raised budget still retrieves zero source evidence", async () => {
+it("finishes with explicit zero-source coverage and the same job identity", async () => {
   const log = vi.spyOn(process.stderr, "write").mockReturnValue(true);
   vi.stubEnv("HOSTED_REVIEW_JOB_ID", "fixture-zero-evidence-job");
   try {
-    const failure = await fixture(undefined, { maxRounds: 16, maxToolCalls: 1 }).catch(
-      (error: unknown) => error,
-    );
-    expect(failure).toBeInstanceOf(ModelReviewError);
-    expect(failure).toMatchObject({
-      code: "repository_evidence_incomplete",
-      message: expect.stringContaining("[repository_evidence_recovery]"),
-      diagnostics: {
-        job_id: "fixture-zero-evidence-job",
-        reviewer: "fixture-reviewer",
-        stage: "repository_evidence_recovery",
-        hunkCount: 1,
-        coveredHunkCount: 0,
-        sourceCount: 0,
-        exhausted: true,
-        retrievalCalls: { read_change: 1, read_file: 0, failed: 0 },
-        reasons: ["source_window_not_covered"],
+    const { result, finalCalls } = await fixture(undefined, { maxRounds: 16, maxToolCalls: 1 });
+    expect(finalCalls).toBe(1);
+    expect(result.retrieval).toMatchObject({
+      filesRead: 0,
+      exhausted: true,
+      changedHunksCovered: false,
+      coverage: {
+        status: "partial",
+        reasons: expect.arrayContaining(["retrieval_budget_exhausted"]),
       },
     });
     const events = log.mock.calls
       .map(([value]) => String(value))
-      .filter((value) => value.startsWith('{"event":"repository.missing-source-evidence"'))
+      .filter((value) => value.startsWith('{"event":"repository.coverage-gap"'))
       .map((value) => JSON.parse(value));
-    expect(events).toEqual([(failure as ModelReviewError).diagnostics]);
-    expect(JSON.stringify(events)).not.toMatch(/source evidence|Review the change|source\.ts/);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ job_id: "fixture-zero-evidence-job", sourceCount: 0 });
   } finally {
     log.mockRestore();
     vi.unstubAllEnvs();
@@ -383,7 +388,11 @@ it("identifies the recovery stage when the raised budget still retrieves zero so
 
 // Reproduce the companion reviewer's 45 text files and eight separated hunks.
 // The recorded production-head source replay lives in repository-job-replay.test.ts.
-async function largeChangeFixture(maxRounds: number, finalRequests: ModelReviewRequest[]) {
+async function largeChangeFixture(
+  maxRounds: number,
+  finalRequests: ModelReviewRequest[],
+  maxToolCalls = 128,
+) {
   const root = await mkdtemp(join(tmpdir(), "sdk-large-change-budget-"));
   const paths = Array.from({ length: 45 }, (_, index) => `model_${index}.sql`);
   const hunkFile = paths.at(-1);
@@ -432,37 +441,29 @@ async function largeChangeFixture(maxRounds: number, finalRequests: ModelReviewR
           required: ["findings"],
           properties: { findings: { type: "array" } },
         },
-        tools: { repository: { maxRounds, maxToolCalls: 128 } },
+        tools: { repository: { maxRounds, maxToolCalls } },
       },
       { baseRef: "HEAD", changedFiles: paths, worktree: true },
       "large-change-reviewer",
     );
     return { result, output, paths };
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
-it("the twelve-round cap cannot finish the 45-file/eight-hunk change or produce a final review", async () => {
-  const log = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+it("retains model findings and available citations when a large change exceeds the call budget", async () => {
   const finalRequests: ModelReviewRequest[] = [];
-  try {
-    await expect(largeChangeFixture(12, finalRequests)).rejects.toMatchObject({
-      code: "repository_evidence_incomplete",
-      message: expect.stringContaining("[repository_evidence_recovery]"),
-      diagnostics: {
-        stage: "repository_evidence_recovery",
-        rounds: 12,
-        exhausted: true,
-        hunkCount: 52,
-        coveredHunkCount: 48,
-        sourceCount: 48,
-      },
-    });
-    expect(finalRequests).toHaveLength(0);
-  } finally {
-    log.mockRestore();
-  }
+  const { result, output } = await largeChangeFixture(12, finalRequests, 64);
+  expect(finalRequests).toHaveLength(1);
+  expect(result.output).toEqual(output);
+  expect(result.citations?.length).toBeGreaterThan(0);
+  expect(result.retrieval).toMatchObject({
+    toolCalls: 64,
+    changedHunksCovered: false,
+    exhausted: true,
+    coverage: { status: "partial" },
+  });
 });
 
 it("sixteen rounds cover all 45 files and eight separated hunks without altering findings", async () => {
@@ -471,7 +472,7 @@ it("sixteen rounds cover all 45 files and eight separated hunks without altering
   expect(result.output).toEqual(output);
   expect(finalRequests).toHaveLength(1);
   expect(result.retrieval).toMatchObject({
-    rounds: 14,
+    rounds: 1,
     toolCalls: 97,
     filesRead: 52,
     exhausted: false,
@@ -486,4 +487,69 @@ it("sixteen rounds cover all 45 files and eight separated hunks without altering
       ),
     ).toBe(true);
   }
+});
+
+it("gives the first planner changed evidence before exploratory lookups", async () => {
+  const { result, requests } = await fixture(
+    undefined,
+    {},
+    {
+      ready: false,
+      operations: [
+        { tool: "read_file", path: "missing-support.ts", cursor: 0, startLine: 1, endLine: 10 },
+      ],
+    },
+  );
+  expect(JSON.stringify(requests[0].input)).toContain("source evidence");
+  expect(result.retrieval?.coverage?.status).toBe("complete");
+  expect(result.citations?.[0].path).toBe("source.ts");
+  expect(JSON.stringify(requests.at(-1)?.input)).toContain("missing-support.ts");
+});
+
+it("retains valid source when another changed file is unavailable", async () => {
+  const { result, finalCalls } = await fixture(["missing.ts", "source.ts"]);
+  expect(finalCalls).toBe(1);
+  expect(
+    result.citations?.some((c) => c.path === "source.ts" && c.content.includes("source evidence")),
+  ).toBe(true);
+  expect(result.retrieval?.coverage).toMatchObject({
+    status: "partial",
+    reasons: ["patch_read_failed"],
+  });
+});
+
+it("treats a truncated patch as a coverage gap without retrying the final review", async () => {
+  const { result, finalCalls } = await fixture(
+    undefined,
+    { maxBytesPerRead: 1024 },
+    undefined,
+    "x".repeat(6000),
+  );
+  expect(finalCalls).toBe(1);
+  expect(result.citations).toEqual([]);
+  expect(result.retrieval?.coverage).toMatchObject({
+    status: "partial",
+    reasons: ["patch_truncated"],
+  });
+});
+
+it("finishes when a changed file was deleted without inventing a head citation", async () => {
+  const { result, finalCalls } = await fixture(
+    undefined,
+    {},
+    undefined,
+    undefined,
+    undefined,
+    false,
+    "source.ts",
+    "HEAD",
+    false,
+    true,
+  );
+  expect(finalCalls).toBe(1);
+  expect(result.citations).toEqual([]);
+  expect(result.retrieval?.coverage).toMatchObject({
+    status: "partial",
+    reasons: ["patch_read_failed"],
+  });
 });

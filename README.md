@@ -228,16 +228,22 @@ results under `repository.toolResults`. Final output schemas should cite the sup
 `citationId` and a line inside its inclusive range. The SDK never exposes arbitrary shell tools,
 follows repository symlinks, or sends provider credentials into the adversary process.
 
-For changed-file reviews, a planner that stops without reading source is recovered inside
-the same retrieval session. The SDK reads up to eight changed files per recovery round
-after retrieving their patches, then reads source windows covering every in-scope head hunk
-(up to 200 lines each) and resumes planning.
-These reads use the same exclusions, filesystem checks, and remaining budgets as ordinary
-model-selected operations. Identical failed reads are not repeated. The optional
-`review.retrieval.sourceReadRecoveries` counter records recovery rounds. Unavailable or
-excluded source remains an explicit gap; recovery never manufactures citations or a clean verdict.
-A recovered session cannot finish until its changed hunks are covered. Missing, truncated,
-or unavailable patches, and budgets exhausted partway through source reads, remain incomplete.
+For changed-file reviews, the SDK preloads patches and changed source in deterministic
+batches before the first model planning call. These batches do not consume planning
+rounds. They use the normal read-only executor, exclusions, filesystem checks, and
+shared call/byte budgets; they are not an unbounded repository scan or one Git command.
+Identical failed reads are not repeated. `review.retrieval.sourceReadRecoveries`
+counts deterministic preload/recovery batches.
+
+Incomplete source retrieval is nonfatal. The SDK calls the final model with all
+available evidence and `review.retrieval.coverage`, then returns the structured
+result and real citations. Missing or truncated patches, missing source, and budget
+exhaustion produce `coverage.status: "partial"` and `changedHunksCovered: false`.
+The final model is instructed to retain supported findings, acknowledge limitations,
+and avoid claiming the whole change is clean. The SDK cannot enforce a universal
+verdict on arbitrary caller schemas; consumers must use the coverage metadata.
+Invalid configuration, unsafe filesystem access (never performed), provider failures,
+and final output validation retain their existing boundaries and behavior.
 
 Declare `permissions.model: true` in `adversary.yaml`. The adversary process receives only a
 short-lived authenticated loopback broker endpoint. Provider credentials, provider selection,
@@ -1038,7 +1044,7 @@ Recovery checks changed-hunk coverage even when the planner already has unrelate
 citations. Rename, mode, binary, and empty-file metadata patches have no head text
 hunks to read; their retrieved patch evidence satisfies that requirement. The SDK
 records `changedHunksCovered: true` only after this deterministic check succeeds.
-Missing, malformed, and truncated patch evidence still prevents completion.
+Missing, malformed, and truncated patch evidence produces explicit partial coverage.
 
 ### Changed-source recovery limits and diagnostics
 
@@ -1049,17 +1055,30 @@ Changes with no in-scope files need no recovery reads.
 
 The change summary is bounded to the first 500 entries. For larger changes,
 `retrieval.omittedChangedFiles` records the omitted count and
-`changedHunksCovered` is not asserted. The same gap is included in the model's
-change summary; source coverage is enforced for the in-scope summarized files
+`changedHunksCovered` is false. The same gap is included in the model's
+change summary; the SDK attempts source coverage for in-scope summarized files
 within the existing retrieval budgets. Untracked worktree files use a read-only
 new-file diff and do not modify the Git index.
 
-When coverage cannot be completed, `ModelReviewError.diagnostics` and a JSON event
-on stderr identify the `repository_evidence_recovery` stage, job ID when available,
-adversary name for rule-context model calls, retrieval-call counts, hunk and source
-counts, and explicit failure reasons. Paths, prompts, source content, and raw tool
-errors are excluded. Direct model-tool callers may pass reviewer identity as the
-optional final argument to `reviewWithRepositoryTools`.
+When coverage cannot be completed, `retrieval.coverage` and a `repository.coverage-gap`
+JSON event on stderr report content-free reasons, counts of observed/covered head
+hunks, omitted files, and the `repository_evidence_recovery` stage. Unread patches
+have unknown hunk counts; these are not an estimate of all hunks in the change.
+The event also includes job ID when available, reviewer identity, and retrieval-call
+counts. Paths, prompts, source content, and raw tool errors are excluded from the event.
+The final model still receives ordinary tool results, including failed lookup results.
+
+```typescript
+const review = await ctx.model.review<MyReview>({ /* prompt, schema, repository tools */ });
+if (review.retrieval?.coverage?.status === "partial") {
+  // Keep evidence-backed findings and show the coverage limitation.
+  // Do not interpret an empty findings list as a clean opinion for the whole change.
+}
+```
+
+The SDK does not synthesize findings, citations, or correctness verdicts. Reviewer
+and worker consumers must remove their own fatal coverage guards and handle partial
+coverage explicitly. An SDK release alone does not change their completion policy.
 
 #### Recorded-head source replay
 
@@ -1075,7 +1094,7 @@ SDK_REPLAY_REPOSITORY=/path/to/isolated/checkout npm test
 
 The tests read Git patches and source through the SDK without executing target
 code. They verify complete coverage with the proposed bounded budget and a
-stage-identifying, zero-source failure with a one-call budget. Without that
+nonfatal, zero-source coverage gap with a one-call budget. Without that
 external checkout, the two replay integration tests are skipped; the synthetic
 capacity and zero-source regressions still run normally.
 
