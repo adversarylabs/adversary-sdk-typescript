@@ -1,0 +1,26 @@
+{
+  "jobId": "d5d35cd6-3786-47a3-a1c4-ae4b5c08d117",
+  "recordedAt": "2026-10-06T19:40:55.305193Z",
+  "repository": "securebuildhq/securebuild",
+  "pullRequest": 201,
+  "headRef": "c6be8c02f61ee283bb51b85e65247e47b35c7aa6",
+  "baseRef": "38fa4e40573bfcee6b3a4bed2d091f2fb920b38b",
+  "baseProvenance": "GitHub comparison merge base for the recorded head, verified 2026-10-06; not a retained worker input",
+  "reviewer": "registry.doomer.ai/library/review/code@sha256:94ff37a6ed147370bf8be1b01a3e997931f060be6f836ecb07b5aa4e0a01ef62",
+  "recordedError": "ModelReviewError: Code review incomplete: recovery retrieved no source evidence for all changed hunks.",
+  "recordedSource": "https://linear.app/doomer-ai/issue/DOO-87/code-review-recovery-retrieved-no-source-evidence-for-all-changed",
+  "changedFiles": [
+    "integration/worker/external_image/external_image_test.go",
+    "integration/worker/external_image/testdata/sbom-enqueue/external-image-tag.yaml",
+    "integration/worker/external_image/testdata/sbom-enqueue/external-image.yaml",
+    "pkg/externalimage/digest.go",
+    "pkg/externalimage/digest_test.go",
+    "pkg/externalimage/monitor.go",
+    "pkg/listener/external-image-sbom.go",
+    "securebuild-api/app/api/v1/external-image/route.ts",
+    "securebuild-api/integration/api/v1/external-image/create.test.ts",
+    "securebuild-api/lib/externalimage/registry.test.ts",
+    "securebuild-api/lib/externalimage/registry.ts",
+    "securebuild-api/lib/utils/queue.ts"
+  ]
+}
