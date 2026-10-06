@@ -1060,3 +1060,26 @@ adversary name for rule-context model calls, retrieval-call counts, hunk and sou
 counts, and explicit failure reasons. Paths, prompts, source content, and raw tool
 errors are excluded. Direct model-tool callers may pass reviewer identity as the
 optional final argument to `reviewWithRepositoryTools`.
+
+#### Recorded-head source replay
+
+`test/fixtures/recovery-job-d5d35cd6.json` records the affected job identity,
+exact repository head, comparison base, reviewer digest, and changed paths.
+Customer source stays outside the SDK repository. To run the optional source
+replay, fetch the recorded base and head into an isolated checkout, check out the
+recorded head with a clean working tree, and supply its path:
+
+```bash
+SDK_REPLAY_REPOSITORY=/path/to/isolated/checkout npm test
+```
+
+The tests read Git patches and source through the SDK without executing target
+code. They verify complete coverage with the proposed bounded budget and a
+stage-identifying, zero-source failure with a one-call budget. Without that
+external checkout, the two replay integration tests are skipped; the synthetic
+capacity and zero-source regressions still run normally.
+
+This replays the recorded source revision with a deterministic planner. Historical
+model responses, worker inputs, and the deployed worker revision were not retained
+in this fixture, so a successful source replay does not establish the original
+production incident's cause.
