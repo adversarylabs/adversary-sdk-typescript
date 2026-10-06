@@ -419,7 +419,12 @@ export async function reviewWithRepositoryTools<T>(
 
     if ((await executeOperations(plan.operations)) === 0) break;
   }
-  if (!ready && (rounds >= budget.maxRounds || toolCalls >= budget.maxToolCalls)) {
+  if (
+    !ready &&
+    (rounds >= budget.maxRounds ||
+      toolCalls >= budget.maxToolCalls ||
+      totalBytes >= budget.maxTotalBytes)
+  ) {
     exhausted = true;
   }
 

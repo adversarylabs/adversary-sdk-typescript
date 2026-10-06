@@ -553,3 +553,36 @@ it("finishes when a changed file was deleted without inventing a head citation",
     reasons: ["patch_read_failed"],
   });
 });
+
+it("reports byte exhaustion when initial context fills the budget before any preload", async () => {
+  const changedFiles = ["source.ts", `${"x".repeat(4100)}.go`];
+  const summary = { tool: "change_summary", baseRef: "HEAD", changedFiles, worktree: true };
+  const initialDirectory = {
+    tool: "list_directory",
+    path: ".",
+    cursor: 0,
+    nextCursor: -1,
+    entries: [
+      { path: "vendor", type: "directory" },
+      { path: "source.ts", type: "file" },
+    ],
+  };
+  const maxTotalBytes =
+    Buffer.byteLength(JSON.stringify(summary)) +
+    Buffer.byteLength(JSON.stringify(initialDirectory));
+  const { result, planningCalls, finalCalls } = await fixture(changedFiles, {
+    maxTotalBytes,
+    include: ["**/*.ts"],
+  });
+  expect(planningCalls).toBe(0);
+  expect(finalCalls).toBe(1);
+  expect(result.retrieval).toMatchObject({
+    bytes: maxTotalBytes,
+    toolCalls: 0,
+    exhausted: true,
+    coverage: {
+      status: "partial",
+      reasons: expect.arrayContaining(["retrieval_budget_exhausted"]),
+    },
+  });
+});
