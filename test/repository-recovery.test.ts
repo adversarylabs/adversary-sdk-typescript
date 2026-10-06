@@ -570,10 +570,15 @@ it("reports byte exhaustion when initial context fills the budget before any pre
   const maxTotalBytes =
     Buffer.byteLength(JSON.stringify(summary)) +
     Buffer.byteLength(JSON.stringify(initialDirectory));
-  const { result, planningCalls, finalCalls } = await fixture(changedFiles, {
+  const { result, requests, planningCalls, finalCalls } = await fixture(changedFiles, {
     maxTotalBytes,
     include: ["**/*.ts"],
   });
+  expect(
+    (
+      requests.at(-1)?.input as { repository: { toolResults: unknown[] } }
+    ).repository.toolResults.slice(0, 2),
+  ).toEqual([summary, initialDirectory]);
   expect(planningCalls).toBe(0);
   expect(finalCalls).toBe(1);
   expect(result.retrieval).toMatchObject({

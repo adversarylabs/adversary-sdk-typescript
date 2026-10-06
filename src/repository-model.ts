@@ -366,7 +366,12 @@ export async function reviewWithRepositoryTools<T>(
     if ((await executeOperations(seed.operations)) === 0 || exhausted) break;
   }
 
-  while (rounds < budget.maxRounds && toolCalls < budget.maxToolCalls && !exhausted) {
+  while (
+    rounds < budget.maxRounds &&
+    toolCalls < budget.maxToolCalls &&
+    totalBytes < budget.maxTotalBytes &&
+    !exhausted
+  ) {
     rounds += 1;
     const planResult = await model.review<RepositoryPlan>({
       prompt: repositoryPlanningPrompt(request.prompt, budget),
