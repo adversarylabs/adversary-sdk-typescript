@@ -3,7 +3,7 @@ import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it, vi } from "vitest";
-import type { ModelReviewRequest, ReviewModel } from "../src/model.js";
+import { ModelReviewError, type ModelReviewRequest, type ReviewModel } from "../src/model.js";
 import {
   type ModelRepositoryToolOptions,
   reviewWithRepositoryTools,
@@ -344,4 +344,146 @@ it("accepts sixteen retrieval rounds but rejects an unbounded round budget", asy
   const { result } = await fixture(undefined, { maxRounds: 16 });
   expect(result.retrieval?.changedHunksCovered).toBe(true);
   await expect(fixture(undefined, { maxRounds: 17 })).rejects.toThrow(/tools.repository.maxRounds/);
+});
+
+it("identifies the recovery stage when the raised budget still retrieves zero source evidence", async () => {
+  const log = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+  vi.stubEnv("HOSTED_REVIEW_JOB_ID", "fixture-zero-evidence-job");
+  try {
+    const failure = await fixture(undefined, { maxRounds: 16, maxToolCalls: 1 }).catch(
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(ModelReviewError);
+    expect(failure).toMatchObject({
+      code: "repository_evidence_incomplete",
+      message: expect.stringContaining("[repository_evidence_recovery]"),
+      diagnostics: {
+        job_id: "fixture-zero-evidence-job",
+        reviewer: "fixture-reviewer",
+        stage: "repository_evidence_recovery",
+        hunkCount: 1,
+        coveredHunkCount: 0,
+        sourceCount: 0,
+        exhausted: true,
+        retrievalCalls: { read_change: 1, read_file: 0, failed: 0 },
+        reasons: ["source_window_not_covered"],
+      },
+    });
+    const events = log.mock.calls
+      .map(([value]) => String(value))
+      .filter((value) => value.startsWith('{"event":"repository.missing-source-evidence"'))
+      .map((value) => JSON.parse(value));
+    expect(events).toEqual([(failure as ModelReviewError).diagnostics]);
+    expect(JSON.stringify(events)).not.toMatch(/source evidence|Review the change|source\.ts/);
+  } finally {
+    log.mockRestore();
+    vi.unstubAllEnvs();
+  }
+});
+
+// Reproduce the companion reviewer's 45 text files and eight separated hunks.
+// This establishes the SDK capacity limit; it is not a replay of the production job.
+async function largeChangeFixture(maxRounds: number, finalRequests: ModelReviewRequest[]) {
+  const root = await mkdtemp(join(tmpdir(), "sdk-large-change-budget-"));
+  const paths = Array.from({ length: 45 }, (_, index) => `model_${index}.sql`);
+  const hunkFile = paths.at(-1);
+  const source = (value: number) =>
+    `${Array.from({ length: 800 }, (_, index) =>
+      index % 100 === 0 ? `select ${value} as value_${index};` : "-- unchanged",
+    ).join("\n")}\n`;
+  try {
+    execFileSync("git", ["-C", root, "init", "-q"]);
+    for (const path of paths)
+      await writeFile(join(root, path), path === hunkFile ? source(0) : "select 0;\n");
+    execFileSync("git", ["-C", root, "add", ...paths]);
+    execFileSync("git", [
+      "-C",
+      root,
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.com",
+      "commit",
+      "-qm",
+      "base",
+    ]);
+    for (const path of paths)
+      await writeFile(join(root, path), path === hunkFile ? source(1) : "select 1;\n");
+    const output = { findings: [{ title: "Existing verified finding" }] };
+    const model: ReviewModel = {
+      async review<T>(request: ModelReviewRequest) {
+        const planning = request.prompt.startsWith("REPOSITORY RETRIEVAL CONTROLLER:");
+        if (!planning) finalRequests.push(request);
+        return {
+          output: (planning ? { ready: true, operations: [] } : output) as T,
+          provider: "fixture",
+          model: "same-model",
+        };
+      },
+    };
+    const result = await reviewWithRepositoryTools(
+      model,
+      root,
+      {
+        prompt: "Review the change.",
+        input: {},
+        schema: {
+          type: "object",
+          required: ["findings"],
+          properties: { findings: { type: "array" } },
+        },
+        tools: { repository: { maxRounds, maxToolCalls: 128 } },
+      },
+      { baseRef: "HEAD", changedFiles: paths, worktree: true },
+      "large-change-reviewer",
+    );
+    return { result, output, paths };
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+it("the twelve-round cap cannot finish the 45-file/eight-hunk change or produce a final review", async () => {
+  const log = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+  const finalRequests: ModelReviewRequest[] = [];
+  try {
+    await expect(largeChangeFixture(12, finalRequests)).rejects.toMatchObject({
+      code: "repository_evidence_incomplete",
+      message: expect.stringContaining("[repository_evidence_recovery]"),
+      diagnostics: {
+        stage: "repository_evidence_recovery",
+        rounds: 12,
+        exhausted: true,
+        hunkCount: 52,
+        coveredHunkCount: 48,
+        sourceCount: 48,
+      },
+    });
+    expect(finalRequests).toHaveLength(0);
+  } finally {
+    log.mockRestore();
+  }
+});
+
+it("sixteen rounds cover all 45 files and eight separated hunks without altering findings", async () => {
+  const finalRequests: ModelReviewRequest[] = [];
+  const { result, output, paths } = await largeChangeFixture(16, finalRequests);
+  expect(result.output).toEqual(output);
+  expect(finalRequests).toHaveLength(1);
+  expect(result.retrieval).toMatchObject({
+    rounds: 14,
+    toolCalls: 97,
+    filesRead: 52,
+    exhausted: false,
+    changedHunksCovered: true,
+  });
+  expect(new Set(result.citations?.map((citation) => citation.path))).toEqual(new Set(paths));
+  for (let line = 1; line <= 701; line += 100) {
+    expect(
+      result.citations?.some(
+        (citation) =>
+          citation.path === paths.at(-1) && citation.startLine <= line && citation.endLine >= line,
+      ),
+    ).toBe(true);
+  }
 });

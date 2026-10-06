@@ -512,7 +512,7 @@ function incompleteRecovery(
   // Never log paths, prompts, source text, or raw tool errors.
   process.stderr.write(`${JSON.stringify(diagnostics)}\n`);
   return new ModelReviewError(
-    "Code review incomplete: recovery retrieved no source evidence for all changed hunks.",
+    "Code review incomplete [repository_evidence_recovery]: recovery retrieved no source evidence for all changed hunks.",
     { code: "repository_evidence_incomplete", diagnostics },
   );
 }
