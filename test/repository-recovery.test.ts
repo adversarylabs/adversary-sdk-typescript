@@ -382,7 +382,7 @@ it("identifies the recovery stage when the raised budget still retrieves zero so
 });
 
 // Reproduce the companion reviewer's 45 text files and eight separated hunks.
-// This establishes the SDK capacity limit; it is not a replay of the production job.
+// The recorded production-head source replay lives in repository-job-replay.test.ts.
 async function largeChangeFixture(maxRounds: number, finalRequests: ModelReviewRequest[]) {
   const root = await mkdtemp(join(tmpdir(), "sdk-large-change-budget-"));
   const paths = Array.from({ length: 45 }, (_, index) => `model_${index}.sql`);
