@@ -1,0 +1,21 @@
+test/repository-recovery.test.ts
+  s_effac2b4965c4d::t_923d076abc01f7 19,24-26,38,40,135-137,212-239
+test/sources.test.ts
+  s_effac2b4965c4d::t_99fd389f6ec6f5 80-97
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e470a023dc9c891a3664132748758bd9dc80a8b9",
+  "prompts": {},
+  "sessions": {
+    "s_effac2b4965c4d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0eed2-c799-7e31-b5ad-bcffd20e23c8",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Marc Campbell <marc.e.campbell@gmail.com>"
+    }
+  }
+}
