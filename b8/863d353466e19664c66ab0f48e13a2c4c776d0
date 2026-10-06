@@ -1,0 +1,21 @@
+test/fixtures/recovery-job-d5d35cd6.json
+  s_dd85d14009b625::t_626a4d93a3ca6c 1-26
+test/repository-job-replay.test.ts
+  s_dd85d14009b625::t_7c142ae1b84d0f 1-105
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b8863d353466e19664c66ab0f48e13a2c4c776d0",
+  "prompts": {},
+  "sessions": {
+    "s_dd85d14009b625": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a112ca-98d3-77e3-8a8d-161524fd6546",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Marc Campbell <marc.e.campbell@gmail.com>"
+    }
+  }
+}
