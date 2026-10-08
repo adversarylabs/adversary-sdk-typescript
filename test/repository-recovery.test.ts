@@ -115,6 +115,7 @@ it.each([true, false])(
       operations: [],
     });
     expect(planningCalls).toBe(1);
+    expect(requests[0]?.budget?.timeoutMs).toBe(600_000);
     expect(finalCalls).toBe(1);
     expect(result.retrieval).toMatchObject({
       filesRead: 1,
@@ -590,4 +591,9 @@ it("reports byte exhaustion when initial context fills the budget before any pre
       reasons: expect.arrayContaining(["retrieval_budget_exhausted"]),
     },
   });
+});
+
+it("preserves an explicit shorter repository planning timeout", async () => {
+  const { requests } = await fixture(undefined, { planningTimeoutMs: 1_234 });
+  expect(requests[0]?.budget?.timeoutMs).toBe(1_234);
 });

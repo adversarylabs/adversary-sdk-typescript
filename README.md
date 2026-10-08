@@ -150,10 +150,15 @@ const review = await ctx.model.review<{
   },
   budget: {
     maximumOutputTokens: 8_000,
-    timeoutMs: 120_000,
+    timeoutMs: 600_000,
   },
 });
 ```
+
+Model review, repository planning, and concern rewrite calls default to a ten-minute
+inference timeout. Explicit shorter budgets remain supported; ten minutes remains
+the maximum model request timeout. These budgets do not extend the outer worker
+review deadline.
 
 Adversaries may add semantic validation that cannot be expressed by JSON Schema. The adversary
 owns the domain rule; the SDK owns bounded regeneration, feedback, timeout accounting, and usage
@@ -203,7 +208,7 @@ const review = await ctx.model.review<EngineeringReview>({
   },
   budget: {
     maximumOutputTokens: 6_000,
-    timeoutMs: 300_000,
+    timeoutMs: 600_000,
   },
 });
 ```
