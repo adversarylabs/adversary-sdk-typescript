@@ -30,7 +30,7 @@ const MAX_PATTERN_LENGTH = 512;
 const MAX_OPERATION_PATH_LENGTH = 4_096;
 const MAX_OPERATIONS_PER_ROUND = 8;
 const PLANNING_OUTPUT_TOKENS = 1_500;
-const DEFAULT_PLANNING_TIMEOUT_MS = 120_000;
+const DEFAULT_PLANNING_TIMEOUT_MS = 600_000;
 const execFileAsync = promisify(execFile);
 
 const defaultExcludedSegments = new Set([

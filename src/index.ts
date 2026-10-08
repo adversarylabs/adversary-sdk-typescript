@@ -2001,7 +2001,7 @@ export const OPINION_CONCERN_REWRITE_SCHEMA: Record<string, unknown> = {
 
 const DEFAULT_CONCERN_REWRITE_BUDGET: Required<ModelReviewBudget> = {
   maximumOutputTokens: 128,
-  timeoutMs: 30_000,
+  timeoutMs: 600_000,
 };
 
 /**
