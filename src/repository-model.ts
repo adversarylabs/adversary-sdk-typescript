@@ -452,6 +452,7 @@ export async function reviewWithRepositoryTools<T>(
     ) {
       rounds += 1;
       const planResult = await model.review<RepositoryPlan>({
+        diagnosticStage: "repository_planning",
         prompt: repositoryPlanningPrompt(request.prompt, budget),
         input: {
           reviewInput: request.input,
@@ -575,6 +576,7 @@ export async function reviewWithRepositoryTools<T>(
     model,
     {
       ...request,
+      diagnosticStage: "model_review",
       prompt: `${request.prompt}
 
 REPOSITORY EVIDENCE:

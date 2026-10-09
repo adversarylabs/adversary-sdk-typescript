@@ -21,7 +21,10 @@ const failureCodes = new Set([
 ]);
 
 /** Bounded, content-free broker timing; never changes request or retry behavior. */
-export function modelAttemptDiagnostics(deadlineMs: number) {
+export function modelAttemptDiagnostics(
+  deadlineMs: number,
+  stage: "model_review" | "repository_planning",
+) {
   const requestId = randomUUID();
   const reviewStarted = performance.now();
   const jobId = identity(process.env.HOSTED_REVIEW_JOB_ID);
@@ -37,6 +40,7 @@ export function modelAttemptDiagnostics(deadlineMs: number) {
           requestId,
           jobId,
           stage: "broker_retry_delay",
+          modelStage: stage,
           attempt,
           deadlineMs,
           remainingDeadlineMs,
@@ -55,7 +59,7 @@ export function modelAttemptDiagnostics(deadlineMs: number) {
         event: "model.attempt",
         requestId,
         jobId,
-        stage: "model_review",
+        stage,
         attempt,
         deadlineMs,
         remainingDeadlineMs: Math.max(0, Math.round(deadlineMs - (started - reviewStarted))),

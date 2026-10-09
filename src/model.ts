@@ -31,7 +31,7 @@ const MAX_VALIDATION_FEEDBACK_BYTES = 8 << 10;
 // the authoritative deadline across connection, headers, body, and retries.
 class ModelBrokerDispatcher extends Agent {
   constructor(private readonly deadlineMs: number) {
-    super();
+    super({ connectTimeout: deadlineMs });
   }
 
   override dispatch(
@@ -62,6 +62,8 @@ export interface ModelReviewValidation<T = unknown> {
 }
 
 export interface ModelReviewRequest<T = unknown> {
+  /** Local timing classification only; never sent to the broker or model. */
+  diagnosticStage?: "model_review" | "repository_planning";
   prompt: string;
   input: unknown;
   schema: Record<string, unknown>;
@@ -128,7 +130,8 @@ export type ContextualReviewModel = ReviewModel & {
 
 export type ModelEnvironment = Readonly<Record<string, string | undefined>>;
 
-interface ModelBrokerRequest extends Omit<ModelReviewRequest, "validation" | "tools"> {
+interface ModelBrokerRequest
+  extends Omit<ModelReviewRequest, "validation" | "tools" | "diagnosticStage"> {
   protocolVersion: typeof ADVERSARY_MODEL_PROTOCOL_VERSION;
 }
 
@@ -148,7 +151,10 @@ interface ModelBrokerErrorResponse {
   };
 }
 
-type NormalizedModelReviewRequest = Omit<ModelReviewRequest, "budget" | "validation" | "tools"> & {
+type NormalizedModelReviewRequest = Omit<
+  ModelReviewRequest,
+  "budget" | "validation" | "tools" | "diagnosticStage"
+> & {
   budget: Required<ModelReviewBudget>;
 };
 
@@ -244,7 +250,10 @@ export class BrokerReviewModel implements ReviewModel {
       );
     }
     const normalized = normalizeRequest(request);
-    const diagnostics = modelAttemptDiagnostics(normalized.budget.timeoutMs);
+    const diagnostics = modelAttemptDiagnostics(
+      normalized.budget.timeoutMs,
+      request.diagnosticStage === "repository_planning" ? "repository_planning" : "model_review",
+    );
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), normalized.budget.timeoutMs);
     const dispatcher = new ModelBrokerDispatcher(normalized.budget.timeoutMs);

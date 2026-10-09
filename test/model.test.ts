@@ -19,7 +19,7 @@ import {
 
 const servers: ReturnType<typeof createServer>[] = [];
 
-it.each(["success", "retry", "timeout"])(
+it.each(["success", "retry", "timeout", "planning"])(
   "records content-free per-attempt timing for %s",
   async (outcome) => {
     const log = vi.spyOn(process.stderr, "write").mockReturnValue(true);
@@ -29,6 +29,7 @@ it.each(["success", "retry", "timeout"])(
     let calls = 0;
     const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
       calls++;
+      expect(JSON.parse(String(init?.body))).not.toHaveProperty("diagnosticStage");
       if (outcome === "timeout") {
         await new Promise<void>((resolve) =>
           init?.signal?.addEventListener("abort", () => resolve(), { once: true }),
@@ -51,6 +52,7 @@ it.each(["success", "retry", "timeout"])(
         initialRetryDelayMs: 0,
       });
       const result = model.review({
+        diagnosticStage: outcome === "planning" ? "repository_planning" : "model_review",
         prompt: "private-prompt",
         input: { source: "private-source" },
         schema: { type: "object" },
@@ -68,7 +70,7 @@ it.each(["success", "retry", "timeout"])(
         expect(record).toMatchObject({
           event: "model.attempt",
           jobId: "fixture-job",
-          stage: "model_review",
+          stage: outcome === "planning" ? "repository_planning" : "model_review",
           deadlineMs,
         });
         expect(record.elapsedMs).toBeGreaterThanOrEqual(0);

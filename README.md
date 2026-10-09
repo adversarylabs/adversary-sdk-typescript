@@ -1089,7 +1089,10 @@ is `unknown`. SDK timing does not change retries or deadlines and does not inclu
 endpoints, credentials, prompts, or source contents. If the deadline expires
 between attempts, a terminal `model.retry-delay` event identifies the
 `broker_retry_delay` stage and records the timeout without inventing another
-model attempt. The parent broker's provider
+model attempt. Attempt events distinguish `repository_planning` calls from
+`model_review` calls, and retry-delay failures retain that classification in
+`modelStage`. The local `diagnosticStage` field never enters the broker payload.
+The parent broker's provider
 timing remains necessary to locate failures inside inference.
 
 

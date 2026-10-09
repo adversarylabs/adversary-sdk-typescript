@@ -835,3 +835,16 @@ it("does not log free text supplied as a model operation path", async () => {
     log.mockRestore();
   }
 });
+
+it("classifies repository planning separately from the final review", async () => {
+  const { requests, planningCalls, finalCalls } = await fixture();
+  expect(planningCalls).toBeGreaterThan(0);
+  expect(finalCalls).toBe(1);
+  for (const request of requests) {
+    expect(request.diagnosticStage).toBe(
+      request.prompt.startsWith("REPOSITORY RETRIEVAL CONTROLLER:")
+        ? "repository_planning"
+        : "model_review",
+    );
+  }
+});
