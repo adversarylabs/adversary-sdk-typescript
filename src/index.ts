@@ -1,6 +1,7 @@
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { Ajv2020, type ValidateFunction } from "ajv/dist/2020.js";
+import { INCOMPLETE_REVIEW_SUMMARY, type ReviewIncompleteReason } from "./candidate-recovery.js";
 import {
   type ContextualReviewModel,
   type ModelConcernRequest,
@@ -51,6 +52,14 @@ export type {
   ModelRepositoryRetrieval,
   ModelRepositoryToolOptions,
 } from "./repository-model.js";
+export {
+  recoverReviewCandidates,
+  validateReviewText,
+  type CandidateValidationIssue,
+  type CandidateRecoveryOptions,
+  type CandidateRecoveryResult,
+  type ReviewIncompleteReason,
+} from "./candidate-recovery.js";
 export { resolveModelCitation } from "./repository-model.js";
 
 export {
@@ -545,6 +554,8 @@ export interface RuleContext {
   observe: (observation: ObservationInit) => void;
   finding: (finding: FindingInput) => void;
   review: {
+    /** Sticky coverage guard; later approvals cannot overwrite it. */
+    incomplete: (reason: ReviewIncompleteReason) => void;
     assessment: (assessment: ReviewAssessment) => void;
     positive: (note: ReviewNoteInput) => void;
     observe: (note: ReviewNoteInput) => void;
@@ -1340,6 +1351,19 @@ function createRuleContext(
       });
     },
     review: {
+      incomplete(reason: ReviewIncompleteReason): void {
+        if (!["candidate_validation", "assessment_validation"].includes(reason))
+          throw new TypeError("Invalid incomplete review reason.");
+        collector.incomplete = true;
+        collector.incompleteBlocking ||= collector.opinion?.ship === false;
+        collector.reviewObservations.push(
+          normalizeReviewNote({
+            key: `review.incomplete:${reason}`,
+            summary: INCOMPLETE_REVIEW_SUMMARY,
+            metadata: { role: "context", incomplete: true, reason },
+          }),
+        );
+      },
       assessment(assessment: ReviewAssessment): void {
         assertAssessment(assessment);
         collector.assessment = assessment;
@@ -1359,6 +1383,7 @@ function createRuleContext(
       opinion(opinion: ReviewOpinion): void {
         assertOpinion(opinion);
         collector.opinion = opinion;
+        if (collector.incomplete && opinion.ship === false) collector.incompleteBlocking = true;
       },
     },
   };
@@ -1430,6 +1455,8 @@ function globPatternToRegExp(pattern: string): RegExp {
 }
 
 interface ReviewCollector {
+  incomplete?: boolean;
+  incompleteBlocking?: boolean;
   observations: ObservationInit[];
   findings: CollectedFinding[];
   assessment?: ReviewAssessment;
@@ -1505,17 +1532,40 @@ function buildReviewResult(input: {
     positives,
   );
 
+  const assessment = input.collector.assessment ?? synthesizeAssessment(eligible, positives);
+  const synthesizedOpinion =
+    input.collector.incomplete || input.collector.opinion === undefined
+      ? synthesizeOpinion(eligible, input.change ?? null)
+      : undefined;
+  const opinion = input.collector.opinion ?? synthesizedOpinion;
+  const inferredRisk = highestRisk(eligible);
+  const riskOrder = ["none", "low", "medium", "high", "critical"];
+  const incompleteRisk =
+    riskOrder.indexOf(assessment.risk) > riskOrder.indexOf(inferredRisk)
+      ? assessment.risk
+      : inferredRisk;
   return omitUndefined({
     adversary: input.adversary,
     target: omitUndefined({
       repository: input.repository,
       filesScanned: input.filesScanned,
     }),
-    assessment: input.collector.assessment ?? synthesizeAssessment(eligible, positives),
+    assessment: input.collector.incomplete
+      ? { ...assessment, risk: incompleteRisk, summary: INCOMPLETE_REVIEW_SUMMARY }
+      : assessment,
     positives,
     observations: reviewObservations,
     findings: eligible,
-    opinion: input.collector.opinion ?? synthesizeOpinion(eligible, input.change ?? null),
+    opinion: input.collector.incomplete
+      ? {
+          ...(input.collector.incompleteBlocking ||
+          opinion?.ship === false ||
+          synthesizedOpinion?.ship === false
+            ? { ship: false }
+            : {}),
+          summary: INCOMPLETE_REVIEW_SUMMARY,
+        }
+      : opinion,
     suppressed: {
       observations: synthesis.suppressedObservations,
       findings: suppressedFindings.length,
