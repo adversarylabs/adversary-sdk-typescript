@@ -22,6 +22,21 @@ const good: Candidate = {
 const bad: Candidate = { ...good, id: "bad", summary: "summary" };
 const validate = (c: Candidate) =>
   validateReviewText(c.summary, { field: "summary", minimumLength: 20, maximumLength: 800 });
+it("withholds custom invalid values without repairing unselected fields", async () => {
+  const f = fixture();
+  const result = await recoverReviewCandidates(f.context, {
+    candidates: [bad, good],
+    validate: (candidate) =>
+      candidate.id === "bad" ? [{ field: "evidence", code: "invalid_value" }] : [],
+    repair: f.repair,
+  });
+  expect(result.candidates).toEqual([good]);
+  expect(result.withheld).toEqual([
+    { index: 0, issues: [{ field: "evidence", code: "invalid_value" }] },
+  ]);
+  expect(f.review).not.toHaveBeenCalled();
+  expect(f.incomplete).toHaveBeenCalledWith("candidate_validation");
+});
 function fixture(output: unknown = { summary: "The retry loses the original request body." }) {
   const incomplete = vi.fn();
   const review = vi.fn(async <T>(_r: ModelReviewRequest<T>) => ({

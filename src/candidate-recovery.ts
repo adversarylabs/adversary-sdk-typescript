@@ -208,9 +208,15 @@ function safeIssues(issues: readonly CandidateValidationIssue[]): CandidateValid
   return issues.map((issue) => {
     requireField(issue.field);
     if (
-      !["missing", "invalid_type", "too_short", "too_long", "placeholder", "repetition"].includes(
-        issue.code,
-      )
+      ![
+        "missing",
+        "invalid_type",
+        "invalid_value",
+        "too_short",
+        "too_long",
+        "placeholder",
+        "repetition",
+      ].includes(issue.code)
     )
       throw new TypeError("Invalid candidate validation code.");
     const safe: CandidateValidationIssue = { field: issue.field, code: issue.code };
