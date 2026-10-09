@@ -1,54 +1,45 @@
 import { randomUUID } from "node:crypto";
 
-export function readErrorReason(error: unknown): string {
-  const code = (error as { code?: unknown } | null)?.code;
-  if (typeof code === "string") {
-    const codes: Record<string, string> = {
-      ENOENT: "file_missing",
-      EACCES: "permission_denied",
-      EPERM: "permission_denied",
-      ENOTDIR: "parent_not_directory",
-      EIO: "io_error",
-      ENOBUFS: "command_output_limit",
-    };
-    if (codes[code]) return codes[code];
+import { normalizeRepositoryPath } from "./repository-path.js";
+
+export type RepositoryReadReason =
+  | "excluded_file"
+  | "symlink_rejected"
+  | "not_regular_file"
+  | "unsafe_path"
+  | "invalid_range"
+  | "range_past_eof"
+  | "binary_file"
+  | "change_context_missing"
+  | "file_not_changed"
+  | "invalid_revision";
+
+export class RepositoryReadError extends Error {
+  constructor(
+    readonly reason: RepositoryReadReason,
+    message: string,
+  ) {
+    super(message);
+    this.name = "RepositoryReadError";
   }
-  const message = error instanceof Error ? error.message : "";
-  if (message.endsWith("outside the configured repository file set")) return "excluded_file";
-  if (message.includes("path must not be a symbolic link")) return "symlink_rejected";
-  if (message.includes("path does not identify a regular")) return "not_regular_file";
-  if (
-    message.includes("bounded repository-relative path") ||
-    message.includes("path escapes the repository root")
-  )
-    return "unsafe_path";
-  if (message === "read_file requires a valid inclusive 1-based line range") return "invalid_range";
-  if (/^read_file line \d+ is beyond the available text$/.test(message)) return "range_past_eof";
-  if (message === "read_file does not support binary content") return "binary_file";
-  if (message === "read_change requires a runner-provided change context")
-    return "change_context_missing";
-  if (message === "read_change path is not in the runner-provided change set")
-    return "file_not_changed";
-  if (message === "change revision is invalid") return "invalid_revision";
-  return "read_failed";
+}
+
+export function readErrorReason(error: unknown): string {
+  if (error instanceof RepositoryReadError) return error.reason;
+  const code = (error as { code?: unknown } | null)?.code;
+  const codes: Record<string, string> = {
+    ENOENT: "file_missing",
+    EACCES: "permission_denied",
+    EPERM: "permission_denied",
+    ENOTDIR: "parent_not_directory",
+    EIO: "io_error",
+    ENOBUFS: "command_output_limit",
+  };
+  return typeof code === "string" && Object.hasOwn(codes, code) ? codes[code] : "read_failed";
 }
 
 export function safeDiagnosticPath(path: string): string {
-  const normalized =
-    path
-      .trim()
-      .replaceAll("\\", "/")
-      .replace(/^\.\/+/u, "") || ".";
-  if (
-    normalized.length > 256 ||
-    normalized.startsWith("/") ||
-    Array.from(normalized).some(
-      (char) => char.charCodeAt(0) <= 31 || char.charCodeAt(0) === 127 || char === ":",
-    ) ||
-    normalized.split("/").includes("..")
-  )
-    return "";
-  return normalized;
+  return normalizeRepositoryPath(path) ?? "[invalid repository path]";
 }
 
 type Counts = { rounds: number; toolCalls: number; bytes: number };

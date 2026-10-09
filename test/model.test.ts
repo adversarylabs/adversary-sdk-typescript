@@ -4,12 +4,13 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { Agent } from "undici";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ADVERSARY_MODEL_PROTOCOL_VERSION,
   Adversary,
   BrokerReviewModel,
-  type ModelReviewError,
+  ModelReviewError,
   type ModelReviewRequest,
   ModelUnavailableError,
   type ReviewModel,
@@ -17,6 +18,49 @@ import {
 } from "../src/index.js";
 
 const servers: ReturnType<typeof createServer>[] = [];
+
+it.each([true, false])(
+  "dispatcher cleanup failure preserves request outcome (success=%s)",
+  async (success) => {
+    const originalDestroy = Agent.prototype.destroy;
+    const cleanup = vi.spyOn(Agent.prototype, "destroy").mockImplementation(async function (
+      this: Agent,
+    ) {
+      await new Promise<void>((resolve, reject) => {
+        originalDestroy.call(this, null, (error) => (error ? reject(error) : resolve()));
+      });
+      throw new Error("cleanup failed");
+    });
+    try {
+      const server = createServer((_request, response) => {
+        response.setHeader("content-type", "application/json");
+        response.end(
+          JSON.stringify({
+            protocolVersion: ADVERSARY_MODEL_PROTOCOL_VERSION,
+            provider: "fixture",
+            model: "fixture",
+            output: success ? {} : null,
+          }),
+        );
+      });
+      servers.push(server);
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const model = new BrokerReviewModel(
+        `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+        "secret",
+      );
+      const result = model.review({ prompt: "Review", input: {}, schema: { type: "object" } });
+      if (success) await expect(result).resolves.toMatchObject({ output: {} });
+      else {
+        await expect(result).rejects.toBeInstanceOf(ModelReviewError);
+        await expect(result).rejects.toMatchObject({ code: "invalid_model_output" });
+      }
+      expect(cleanup).toHaveBeenCalledOnce();
+    } finally {
+      cleanup.mockRestore();
+    }
+  },
+);
 
 afterEach(async () => {
   await Promise.all(

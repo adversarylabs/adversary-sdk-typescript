@@ -9,46 +9,96 @@ import {
   reviewWithRepositoryTools,
 } from "../src/repository-model.js";
 
-it("logs requested and returned ranges for route paths with brackets without logging source", async () => {
-  const logs: string[] = [];
-  const spy = vi.spyOn(process.stderr, "write").mockImplementation((line) => {
-    logs.push(String(line));
-    return true;
-  });
-  try {
-    const path = "src/app/tags/[tag]/page.tsx";
-    await fixture(
-      [path],
-      { readDiagnostics: true },
-      { ready: true, operations: [] },
-      "private source line\nsecond\nthird\n",
-      "old\nsecond\nthird\n",
-      false,
-      path,
-    );
-    const records = logs
-      .join("")
-      .split("\n")
-      .filter((line) => line.startsWith('{"event":"repository.read-detail"'))
-      .map((line) => JSON.parse(line));
-    const read = records.find((r) => r.tool === "read_file" && r.outcome === "succeeded");
-    expect(read).toMatchObject({
-      file: path,
-      requestedStart: 1,
-      requestedEnd: 3,
-      returnedStart: 1,
-      returnedEnd: 3,
-      citation: "repo:read:1",
-      retained: true,
-      stopReason: "end_of_file",
+it.each(["provider error", "invalid plan"])(
+  "finishes diagnostics when retrieval stops on %s",
+  async (failure) => {
+    const root = await mkdtemp(join(tmpdir(), "sdk-diagnostic-failure-"));
+    const logs: string[] = [];
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation((line) => {
+      logs.push(String(line));
+      return true;
     });
-    expect(records.every((r) => r.readingId === read.readingId)).toBe(true);
-    expect(records.at(-1)).toMatchObject({ kind: "session", outcome: "finished", complete: true });
-    expect(logs.join("")).not.toContain("private source line");
-  } finally {
-    spy.mockRestore();
-  }
-});
+    const error = new Error("provider failed");
+    const model: ReviewModel = {
+      async review<T>() {
+        if (failure === "provider error") throw error;
+        return { output: null as T };
+      },
+    };
+    try {
+      await expect(
+        reviewWithRepositoryTools(model, root, {
+          prompt: "Review",
+          input: {},
+          schema: { type: "object" },
+          tools: { repository: { readDiagnostics: true } },
+        }),
+      ).rejects.toThrow();
+      const records = logs
+        .join("")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(records.filter((record) => record.outcome === "finished")).toHaveLength(1);
+      expect(records.at(-1)).toMatchObject({
+        kind: "session",
+        outcome: "finished",
+        complete: false,
+        rounds: 1,
+      });
+    } finally {
+      spy.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
+it.each(["src/app/tags/[tag]/page.tsx", `${"a".repeat(160)}/${"b".repeat(110)}.ts`])(
+  "logs requested and returned ranges for %s without logging source",
+  async (path) => {
+    const logs: string[] = [];
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation((line) => {
+      logs.push(String(line));
+      return true;
+    });
+    try {
+      await fixture(
+        [path],
+        { readDiagnostics: true },
+        { ready: true, operations: [] },
+        "private source line\nsecond\nthird\n",
+        "old\nsecond\nthird\n",
+        false,
+        path,
+      );
+      const records = logs
+        .join("")
+        .split("\n")
+        .filter((line) => line.startsWith('{"event":"repository.read-detail"'))
+        .map((line) => JSON.parse(line));
+      const read = records.find((r) => r.tool === "read_file" && r.outcome === "succeeded");
+      expect(read).toMatchObject({
+        file: path,
+        requestedStart: 1,
+        requestedEnd: 3,
+        returnedStart: 1,
+        returnedEnd: 3,
+        citation: "repo:read:1",
+        retained: true,
+        stopReason: "end_of_file",
+      });
+      expect(records.every((r) => r.readingId === read.readingId)).toBe(true);
+      expect(records.at(-1)).toMatchObject({
+        kind: "session",
+        outcome: "finished",
+        complete: true,
+      });
+      expect(logs.join("")).not.toContain("private source line");
+    } finally {
+      spy.mockRestore();
+    }
+  },
+);
 
 it("logs a past-end-of-file read with the requested range and a fixed error", async () => {
   const logs: string[] = [];
@@ -113,7 +163,11 @@ it("logs results discarded at the total text limit rather than claiming a retain
       }),
     );
     expect(records).toContainEqual(
-      expect.objectContaining({ kind: "gap", reason: "patch_not_requested", file: "source.ts" }),
+      expect.objectContaining({
+        kind: "gap",
+        reason: "patch_discarded_byte_limit",
+        file: "source.ts",
+      }),
     );
     expect(records.at(-1)).toMatchObject({ kind: "session", complete: false });
     expect(logs.join("")).not.toContain("x".repeat(100));

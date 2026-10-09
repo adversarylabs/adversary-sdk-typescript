@@ -273,7 +273,12 @@ export class BrokerReviewModel implements ReviewModel {
       });
     } finally {
       clearTimeout(timeout);
-      await dispatcher.destroy();
+      // Cleanup must not replace the typed request error or a successful response.
+      try {
+        await dispatcher.destroy();
+      } catch {
+        // The dispatcher is no longer used after this request.
+      }
     }
   }
 

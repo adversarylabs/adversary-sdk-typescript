@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { createReadStream } from "node:fs";
 import { lstat, readdir, realpath } from "node:fs/promises";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { promisify } from "node:util";
 import {
@@ -13,10 +13,13 @@ import {
   reviewWithValidation,
 } from "./model.js";
 import {
+  RepositoryReadError,
   readErrorReason,
   repositoryDiagnostics,
   safeDiagnosticPath,
 } from "./repository-diagnostics.js";
+
+import { normalizeRepositoryPath } from "./repository-path.js";
 
 const DEFAULT_MAX_ROUNDS = 6;
 const MAX_MAX_ROUNDS = 16;
@@ -32,7 +35,7 @@ const DEFAULT_DIRECTORY_PAGE_SIZE = 200;
 const MAX_DIRECTORY_PAGE_SIZE = 1_000;
 const MAX_PATTERNS = 128;
 const MAX_PATTERN_LENGTH = 512;
-const MAX_OPERATION_PATH_LENGTH = 4_096;
+
 const MAX_OPERATIONS_PER_ROUND = 8;
 const PLANNING_OUTPUT_TOKENS = 1_500;
 const DEFAULT_PLANNING_TIMEOUT_MS = 600_000;
@@ -270,6 +273,7 @@ export async function reviewWithRepositoryTools<T>(
   const citations: ModelRepositoryCitation[] = [];
   const toolResults: RepositoryToolResult[] = [];
   const completed = new Set<string>();
+  const discardedChanges = new Set<string>();
   let rounds = 0;
   let toolCalls = 0;
   let totalBytes = 0;
@@ -283,197 +287,160 @@ export async function reviewWithRepositoryTools<T>(
   diagnostics.start();
   const counts = () => ({ rounds, toolCalls, bytes: totalBytes });
 
-  if (change !== undefined && change !== null) {
-    const summary: ChangeSummaryToolResult = {
-      tool: "change_summary",
-      ...(change.baseRef === undefined ? {} : { baseRef: change.baseRef }),
-      ...(change.headRef === undefined ? {} : { headRef: change.headRef }),
-      changedFiles: change.changedFiles.slice(0, 500),
-      worktree: change.worktree,
-      ...(omittedChangedFiles > 0 ? { omittedChangedFiles } : {}),
-    };
-    toolResults.push(summary);
-    totalBytes += encodedBytes(summary);
-  }
-
-  const initial = fitDirectoryResult(
-    await executeListDirectory(root, ".", 0, budget.directoryPageSize, include, exclude),
-    budget.maxTotalBytes,
-  );
-  toolResults.push(initial);
-  totalBytes += encodedBytes(initial);
-  directoriesListed += 1;
-  completed.add("list_directory:.:0");
-
-  // Every batch uses the same guarded executor and shared budgets. Seed changed
-  // evidence before inference so exploratory model calls cannot consume its budget.
-  async function executeOperations(
-    operations: readonly RepositoryOperation[],
-    phase: string,
-  ): Promise<number> {
-    let executed = 0;
-    for (const operation of operations) {
-      const details = {
-        kind: "operation",
-        phase,
-        tool: operation.tool,
-        file: safeDiagnosticPath(operation.path),
-        requestedStart: operation.startLine,
-        requestedEnd: operation.endLine,
+  let coverage: ModelRepositoryCoverage | undefined;
+  let retrievalComplete = false;
+  try {
+    if (change !== undefined && change !== null) {
+      const summary: ChangeSummaryToolResult = {
+        tool: "change_summary",
+        ...(change.baseRef === undefined ? {} : { baseRef: change.baseRef }),
+        ...(change.headRef === undefined ? {} : { headRef: change.headRef }),
+        changedFiles: change.changedFiles.slice(0, 500),
+        worktree: change.worktree,
+        ...(omittedChangedFiles > 0 ? { omittedChangedFiles } : {}),
       };
-      if (toolCalls >= budget.maxToolCalls || totalBytes >= budget.maxTotalBytes) {
-        exhausted = true;
-        diagnostics.emit(
-          {
-            ...details,
-            outcome: "skipped_limit",
-            reason: toolCalls >= budget.maxToolCalls ? "call_limit" : "total_byte_limit",
-          },
-          counts(),
-        );
-        break;
-      }
-      const key = operationKey(operation);
-      if (completed.has(key)) {
-        diagnostics.emit(
-          { ...details, outcome: "skipped_duplicate", reason: "duplicate_request" },
-          counts(),
-        );
-        continue;
-      }
-      completed.add(key);
-      toolCalls += 1;
-      executed += 1;
-      diagnostics.emit({ ...details, outcome: "started" }, counts());
-      let result: RepositoryToolResult;
-      let failureReason = "";
-      let pendingCitation: ModelRepositoryCitation | undefined;
-      try {
-        if (operation.tool === "list_directory") {
-          result = await executeListDirectory(
-            root,
-            operation.path,
-            operation.cursor,
-            budget.directoryPageSize,
-            include,
-            exclude,
-          );
-          directoriesListed += 1;
-        } else if (operation.tool === "read_file") {
-          result = await executeReadFile(
-            root,
-            operation,
-            budget,
-            include,
-            exclude,
-            `repo:read:${citations.length + 1}`,
-          );
-          pendingCitation = {
-            citationId: result.citationId,
-            path: result.path,
-            startLine: result.startLine,
-            endLine: result.endLine,
-            content: result.content,
-          };
-        } else {
-          result = await executeReadChange(root, operation, budget, include, exclude, change);
-        }
-      } catch (error) {
-        failureReason = readErrorReason(error);
-        result = {
+      toolResults.push(summary);
+      totalBytes += encodedBytes(summary);
+    }
+
+    const initial = fitDirectoryResult(
+      await executeListDirectory(root, ".", 0, budget.directoryPageSize, include, exclude),
+      budget.maxTotalBytes,
+    );
+    toolResults.push(initial);
+    totalBytes += encodedBytes(initial);
+    directoriesListed += 1;
+    completed.add("list_directory:.:0");
+
+    // Every batch uses the same guarded executor and shared budgets. Seed changed
+    // evidence before inference so exploratory model calls cannot consume its budget.
+    async function executeOperations(
+      operations: readonly RepositoryOperation[],
+      phase: string,
+    ): Promise<number> {
+      let executed = 0;
+      for (const operation of operations) {
+        const details = {
+          kind: "operation",
+          phase,
           tool: operation.tool,
-          path: operation.path,
-          error: error instanceof Error ? error.message : String(error),
+          file: safeDiagnosticPath(operation.path),
+          requestedStart: operation.startLine,
+          requestedEnd: operation.endLine,
         };
-      }
-      const bytes = encodedBytes(result);
-      if (totalBytes + bytes > budget.maxTotalBytes) {
-        exhausted = true;
+        if (toolCalls >= budget.maxToolCalls || totalBytes >= budget.maxTotalBytes) {
+          exhausted = true;
+          diagnostics.emit(
+            {
+              ...details,
+              outcome: "skipped_limit",
+              reason: toolCalls >= budget.maxToolCalls ? "call_limit" : "total_byte_limit",
+            },
+            counts(),
+          );
+          break;
+        }
+        const key = operationKey(operation);
+        if (completed.has(key)) {
+          diagnostics.emit(
+            { ...details, outcome: "skipped_duplicate", reason: "duplicate_request" },
+            counts(),
+          );
+          continue;
+        }
+        completed.add(key);
+        toolCalls += 1;
+        executed += 1;
+        diagnostics.emit({ ...details, outcome: "started" }, counts());
+        let result: RepositoryToolResult;
+        let failureReason = "";
+        let pendingCitation: ModelRepositoryCitation | undefined;
+        try {
+          if (operation.tool === "list_directory") {
+            result = await executeListDirectory(
+              root,
+              operation.path,
+              operation.cursor,
+              budget.directoryPageSize,
+              include,
+              exclude,
+            );
+            directoriesListed += 1;
+          } else if (operation.tool === "read_file") {
+            result = await executeReadFile(
+              root,
+              operation,
+              budget,
+              include,
+              exclude,
+              `repo:read:${citations.length + 1}`,
+            );
+            pendingCitation = {
+              citationId: result.citationId,
+              path: result.path,
+              startLine: result.startLine,
+              endLine: result.endLine,
+              content: result.content,
+            };
+          } else {
+            result = await executeReadChange(root, operation, budget, include, exclude, change);
+          }
+        } catch (error) {
+          failureReason = readErrorReason(error);
+          result = {
+            tool: operation.tool,
+            path: operation.path,
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
+        const bytes = encodedBytes(result);
+        if (totalBytes + bytes > budget.maxTotalBytes) {
+          if (operation.tool === "read_change") discardedChanges.add(operation.path);
+          exhausted = true;
+          diagnostics.emit(
+            {
+              ...details,
+              outcome: "discarded_limit",
+              reason: "result_exceeds_total_byte_limit",
+              resultBytes: bytes,
+              retained: false,
+              returnedStart: pendingCitation?.startLine ?? 0,
+              returnedEnd: pendingCitation?.endLine ?? 0,
+              citation: pendingCitation?.citationId ?? "",
+              truncated: "truncated" in result && result.truncated,
+              stopReason: "stopReason" in result ? result.stopReason : "",
+            },
+            counts(),
+          );
+          break;
+        }
+        toolResults.push(result);
+        totalBytes += bytes;
+        if (pendingCitation !== undefined) {
+          citations.push(pendingCitation);
+          filesRead += 1;
+        }
         diagnostics.emit(
           {
             ...details,
-            outcome: "discarded_limit",
-            reason: "result_exceeds_total_byte_limit",
+            outcome: "error" in result ? "failed" : "succeeded",
+            reason: failureReason,
             resultBytes: bytes,
-            retained: false,
             returnedStart: pendingCitation?.startLine ?? 0,
             returnedEnd: pendingCitation?.endLine ?? 0,
             citation: pendingCitation?.citationId ?? "",
+            retained: true,
             truncated: "truncated" in result && result.truncated,
             stopReason: "stopReason" in result ? result.stopReason : "",
           },
           counts(),
         );
-        break;
       }
-      toolResults.push(result);
-      totalBytes += bytes;
-      if (pendingCitation !== undefined) {
-        citations.push(pendingCitation);
-        filesRead += 1;
-      }
-      diagnostics.emit(
-        {
-          ...details,
-          outcome: "error" in result ? "failed" : "succeeded",
-          reason: failureReason,
-          resultBytes: bytes,
-          returnedStart: pendingCitation?.startLine ?? 0,
-          returnedEnd: pendingCitation?.endLine ?? 0,
-          citation: pendingCitation?.citationId ?? "",
-          retained: true,
-          truncated: "truncated" in result && result.truncated,
-          stopReason: "stopReason" in result ? result.stopReason : "",
-        },
-        counts(),
-      );
+      return executed;
     }
-    return executed;
-  }
 
-  while (toolCalls < budget.maxToolCalls && totalBytes < budget.maxTotalBytes) {
-    const seed = sourceRecoveryOperations(change, toolResults, completed, budget, include, exclude);
-    if (seed.complete || seed.operations.length === 0) break;
-    sourceReadRecoveries += 1;
-    if ((await executeOperations(seed.operations, "seed")) === 0 || exhausted) break;
-  }
-
-  while (
-    rounds < budget.maxRounds &&
-    toolCalls < budget.maxToolCalls &&
-    totalBytes < budget.maxTotalBytes &&
-    !exhausted
-  ) {
-    rounds += 1;
-    const planResult = await model.review<RepositoryPlan>({
-      prompt: repositoryPlanningPrompt(request.prompt, budget),
-      input: {
-        reviewInput: request.input,
-        repository: {
-          toolResults,
-          budget: {
-            round: rounds,
-            roundsRemaining: budget.maxRounds - rounds,
-            callsRemaining: budget.maxToolCalls - toolCalls,
-            bytesRemaining: budget.maxTotalBytes - totalBytes,
-          },
-        },
-      },
-      schema: repositoryPlanSchema,
-      budget: {
-        maximumOutputTokens: PLANNING_OUTPUT_TOKENS,
-        timeoutMs: budget.planningTimeoutMs,
-      },
-    });
-    usage = addUsage(usage, planResult.usage);
-    const plan = requireRepositoryPlan(planResult.output);
-    if (
-      plan.ready ||
-      !plan.operations.some((operation) => !completed.has(operationKey(operation))) ||
-      (rounds === budget.maxRounds &&
-        !plan.operations.some((operation) => operation.tool === "read_file"))
-    ) {
-      const recovery = sourceRecoveryOperations(
+    while (toolCalls < budget.maxToolCalls && totalBytes < budget.maxTotalBytes) {
+      const seed = sourceRecoveryOperations(
         change,
         toolResults,
         completed,
@@ -481,68 +448,121 @@ export async function reviewWithRepositoryTools<T>(
         include,
         exclude,
       );
-      // A failed/exhausted optional read is a coverage gap, not a failed review.
-      if (!recovery.complete && recovery.operations.length === 0) break;
-      if (recovery.operations.length > 0) {
-        plan.ready = false;
-        plan.operations = recovery.operations;
-        sourceReadRecoveries += 1;
-      }
-    }
-    if (plan.ready) {
-      ready = true;
-      break;
+      if (seed.complete || seed.operations.length === 0) break;
+      sourceReadRecoveries += 1;
+      if ((await executeOperations(seed.operations, "seed")) === 0 || exhausted) break;
     }
 
-    if ((await executeOperations(plan.operations, "planner")) === 0) break;
-  }
-  if (
-    !ready &&
-    (rounds >= budget.maxRounds ||
-      toolCalls >= budget.maxToolCalls ||
-      totalBytes >= budget.maxTotalBytes)
-  ) {
-    exhausted = true;
-  }
-
-  const changedCoverage = sourceRecoveryOperations(
-    change,
-    toolResults,
-    completed,
-    budget,
-    include,
-    exclude,
-  );
-  const coverage: ModelRepositoryCoverage | undefined = change
-    ? {
-        status: changedCoverage.complete && omittedChangedFiles === 0 ? "complete" : "partial",
-        changedFiles: change.changedFiles.length,
-        inScopeChangedFiles: inScopePaths.length,
-        omittedChangedFiles,
-        hunkCount: changedCoverage.hunkCount,
-        coveredHunkCount: changedCoverage.coveredHunkCount,
-        reasons: [
-          ...new Set([
-            ...changedCoverage.reasons,
-            ...(omittedChangedFiles > 0 ? ["changed_files_omitted"] : []),
-            ...(!changedCoverage.complete && exhausted ? ["retrieval_budget_exhausted"] : []),
-          ]),
-        ],
+    while (
+      rounds < budget.maxRounds &&
+      toolCalls < budget.maxToolCalls &&
+      totalBytes < budget.maxTotalBytes &&
+      !exhausted
+    ) {
+      rounds += 1;
+      const planResult = await model.review<RepositoryPlan>({
+        prompt: repositoryPlanningPrompt(request.prompt, budget),
+        input: {
+          reviewInput: request.input,
+          repository: {
+            toolResults,
+            budget: {
+              round: rounds,
+              roundsRemaining: budget.maxRounds - rounds,
+              callsRemaining: budget.maxToolCalls - toolCalls,
+              bytesRemaining: budget.maxTotalBytes - totalBytes,
+            },
+          },
+        },
+        schema: repositoryPlanSchema,
+        budget: {
+          maximumOutputTokens: PLANNING_OUTPUT_TOKENS,
+          timeoutMs: budget.planningTimeoutMs,
+        },
+      });
+      usage = addUsage(usage, planResult.usage);
+      const plan = requireRepositoryPlan(planResult.output);
+      if (
+        plan.ready ||
+        !plan.operations.some((operation) => !completed.has(operationKey(operation))) ||
+        (rounds === budget.maxRounds &&
+          !plan.operations.some((operation) => operation.tool === "read_file"))
+      ) {
+        const recovery = sourceRecoveryOperations(
+          change,
+          toolResults,
+          completed,
+          budget,
+          include,
+          exclude,
+        );
+        // A failed/exhausted optional read is a coverage gap, not a failed review.
+        if (!recovery.complete && recovery.operations.length === 0) break;
+        if (recovery.operations.length > 0) {
+          plan.ready = false;
+          plan.operations = recovery.operations;
+          sourceReadRecoveries += 1;
+        }
       }
-    : undefined;
-  if (options.readDiagnostics === true)
-    reportMissingReads(change, toolResults, include, exclude, (details) =>
-      diagnostics.emit(details, counts()),
-    );
-  diagnostics.finish(counts(), coverage?.status !== "partial");
-  if (coverage?.status === "partial") {
-    reportIncompleteCoverage(
-      changedCoverage,
+      if (plan.ready) {
+        ready = true;
+        break;
+      }
+
+      if ((await executeOperations(plan.operations, "planner")) === 0) break;
+    }
+    if (
+      !ready &&
+      (rounds >= budget.maxRounds ||
+        toolCalls >= budget.maxToolCalls ||
+        totalBytes >= budget.maxTotalBytes)
+    ) {
+      exhausted = true;
+    }
+
+    const changedCoverage = sourceRecoveryOperations(
+      change,
       toolResults,
-      { rounds, toolCalls, filesRead, exhausted },
-      reviewer,
-      coverage,
+      completed,
+      budget,
+      include,
+      exclude,
     );
+    coverage = change
+      ? {
+          status: changedCoverage.complete && omittedChangedFiles === 0 ? "complete" : "partial",
+          changedFiles: change.changedFiles.length,
+          inScopeChangedFiles: inScopePaths.length,
+          omittedChangedFiles,
+          hunkCount: changedCoverage.hunkCount,
+          coveredHunkCount: changedCoverage.coveredHunkCount,
+          reasons: [
+            ...new Set([
+              ...changedCoverage.reasons,
+              ...(omittedChangedFiles > 0 ? ["changed_files_omitted"] : []),
+              ...(!changedCoverage.complete && exhausted ? ["retrieval_budget_exhausted"] : []),
+            ]),
+          ],
+        }
+      : undefined;
+    if (options.readDiagnostics === true)
+      reportMissingReads(change, toolResults, include, exclude, discardedChanges, (details) =>
+        diagnostics.emit(details, counts()),
+      );
+
+    if (coverage?.status === "partial") {
+      reportIncompleteCoverage(
+        changedCoverage,
+        toolResults,
+        { rounds, toolCalls, filesRead, exhausted },
+        reviewer,
+        coverage,
+      );
+    }
+
+    retrievalComplete = coverage?.status !== "partial";
+  } finally {
+    diagnostics.finish(counts(), retrievalComplete);
   }
 
   const frozenCitations = Object.freeze(
@@ -970,12 +990,18 @@ async function executeReadFile(
     operation.startLine < 1 ||
     operation.endLine < operation.startLine
   ) {
-    throw new Error("read_file requires a valid inclusive 1-based line range");
+    throw new RepositoryReadError(
+      "invalid_range",
+      "read_file requires a valid inclusive 1-based line range",
+    );
   }
   const endLine = Math.min(operation.endLine, operation.startLine + budget.maxLinesPerRead - 1);
   const { absolute, relativePath } = await secureRepositoryPath(root, operation.path, "file");
   if (!isIncluded(relativePath, include) || isExcluded(relativePath, exclude)) {
-    throw new Error("read_file path is outside the configured repository file set");
+    throw new RepositoryReadError(
+      "excluded_file",
+      "read_file path is outside the configured repository file set",
+    );
   }
   const stream = createReadStream(absolute, { encoding: "utf8" });
   const lines = createInterface({ input: stream, crlfDelay: Number.POSITIVE_INFINITY });
@@ -993,7 +1019,8 @@ async function executeReadFile(
         stopReason = endLine < operation.endLine ? "line_limit" : "requested_end";
         break;
       }
-      if (line.includes("\0")) throw new Error("read_file does not support binary content");
+      if (line.includes("\0"))
+        throw new RepositoryReadError("binary_file", "read_file does not support binary content");
       const next = Buffer.byteLength(line, "utf8") + (selected.length === 0 ? 0 : 1);
       if (bytes + next > budget.maxBytesPerRead) {
         truncated = true;
@@ -1008,7 +1035,10 @@ async function executeReadFile(
     stream.destroy();
   }
   if (selected.length === 0) {
-    throw new Error(`read_file line ${operation.startLine} is beyond the available text`);
+    throw new RepositoryReadError(
+      "range_past_eof",
+      `read_file line ${operation.startLine} is beyond the available text`,
+    );
   }
   const result: ReadToolResult = {
     tool: "read_file",
@@ -1034,14 +1064,23 @@ async function executeReadChange(
   change: ModelRepositoryChange | null | undefined,
 ): Promise<ChangeToolResult> {
   if (change === undefined || change === null || change.baseRef === undefined) {
-    throw new Error("read_change requires a runner-provided change context");
+    throw new RepositoryReadError(
+      "change_context_missing",
+      "read_change requires a runner-provided change context",
+    );
   }
   const { relativePath } = await secureRepositoryPath(root, operation.path, "file");
   if (!change.changedFiles.includes(relativePath)) {
-    throw new Error("read_change path is not in the runner-provided change set");
+    throw new RepositoryReadError(
+      "file_not_changed",
+      "read_change path is not in the runner-provided change set",
+    );
   }
   if (!isIncluded(relativePath, include) || isExcluded(relativePath, exclude)) {
-    throw new Error("read_change path is outside the configured repository file set");
+    throw new RepositoryReadError(
+      "excluded_file",
+      "read_change path is outside the configured repository file set",
+    );
   }
   const baseRef = validRevision(change.baseRef);
   const headRef = change.worktree ? "WORKTREE" : validRevision(change.headRef ?? "");
@@ -1119,6 +1158,7 @@ function reportMissingReads(
   results: readonly RepositoryToolResult[],
   include: readonly RegExp[],
   exclude: readonly RegExp[],
+  discardedChanges: ReadonlySet<string>,
   emit: (details: Record<string, string | number | boolean>) => void,
 ): void {
   for (const path of new Set(change?.changedFiles.slice(0, 500) ?? [])) {
@@ -1143,7 +1183,9 @@ function reportMissingReads(
       gap(
         results.some((r) => r.tool === "read_change" && r.path === path && "error" in r)
           ? "patch_read_failed"
-          : "patch_not_requested",
+          : discardedChanges.has(path)
+            ? "patch_discarded_byte_limit"
+            : "patch_not_requested",
       );
       continue;
     }
@@ -1195,7 +1237,7 @@ function validRevision(value: string): string {
     revision.includes("\n") ||
     revision.includes("\r")
   ) {
-    throw new Error("change revision is invalid");
+    throw new RepositoryReadError("invalid_revision", "change revision is invalid");
   }
   return revision;
 }
@@ -1205,28 +1247,28 @@ async function secureRepositoryPath(
   requestedPath: string,
   kind: "directory" | "file",
 ): Promise<{ absolute: string; relativePath: string }> {
-  const normalized =
-    requestedPath
-      .trim()
-      .replaceAll("\\", "/")
-      .replace(/^\.\/+/u, "") || ".";
-  if (
-    normalized.length > MAX_OPERATION_PATH_LENGTH ||
-    normalized.includes("\0") ||
-    isAbsolute(normalized) ||
-    normalized.split("/").includes("..")
-  ) {
-    throw new Error(`${kind} path must be a bounded repository-relative path`);
+  const normalized = normalizeRepositoryPath(requestedPath);
+  if (normalized === undefined) {
+    throw new RepositoryReadError(
+      "unsafe_path",
+      `${kind} path must be a bounded repository-relative path`,
+    );
   }
   const candidate = resolve(root, normalized);
-  if (!isWithinRoot(root, candidate)) throw new Error(`${kind} path escapes the repository root`);
+  if (!isWithinRoot(root, candidate))
+    throw new RepositoryReadError("unsafe_path", `${kind} path escapes the repository root`);
   const info = await lstat(candidate);
-  if (info.isSymbolicLink()) throw new Error(`${kind} path must not be a symbolic link`);
+  if (info.isSymbolicLink())
+    throw new RepositoryReadError("symlink_rejected", `${kind} path must not be a symbolic link`);
   if (kind === "directory" ? !info.isDirectory() : !info.isFile()) {
-    throw new Error(`${kind} path does not identify a regular ${kind}`);
+    throw new RepositoryReadError(
+      "not_regular_file",
+      `${kind} path does not identify a regular ${kind}`,
+    );
   }
   const canonical = await realpath(candidate);
-  if (!isWithinRoot(root, canonical)) throw new Error(`${kind} path escapes the repository root`);
+  if (!isWithinRoot(root, canonical))
+    throw new RepositoryReadError("unsafe_path", `${kind} path escapes the repository root`);
   const relativePath = relative(root, canonical).replaceAll("\\", "/") || ".";
   return { absolute: canonical, relativePath };
 }
