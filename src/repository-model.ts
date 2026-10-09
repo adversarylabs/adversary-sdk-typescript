@@ -17,6 +17,7 @@ import {
   readErrorReason,
   repositoryDiagnostics,
   safeDiagnosticPath,
+  writeRepositoryDiagnostic,
 } from "./repository-diagnostics.js";
 
 import { normalizeRepositoryPath } from "./repository-path.js";
@@ -287,6 +288,102 @@ export async function reviewWithRepositoryTools<T>(
   diagnostics.start();
   const counts = () => ({ rounds, toolCalls, bytes: totalBytes });
 
+  // Every batch uses the same guarded executor and shared budgets. Seed changed
+  // evidence before inference so exploratory model calls cannot consume its budget.
+  async function executeOperations(
+    operations: readonly RepositoryOperation[],
+    phase: string,
+  ): Promise<number> {
+    let executed = 0;
+    for (const operation of operations) {
+      const details = {
+        kind: "operation",
+        phase,
+        tool: operation.tool,
+        file: safeDiagnosticPath(operation.path),
+        requestedStart: operation.startLine,
+        requestedEnd: operation.endLine,
+      };
+      if (toolCalls >= budget.maxToolCalls || totalBytes >= budget.maxTotalBytes) {
+        exhausted = true;
+        diagnostics.emit(
+          {
+            ...details,
+            outcome: "skipped_limit",
+            reason: toolCalls >= budget.maxToolCalls ? "call_limit" : "total_byte_limit",
+          },
+          counts(),
+        );
+        break;
+      }
+      const key = operationKey(operation);
+      if (completed.has(key)) {
+        diagnostics.emit(
+          { ...details, outcome: "skipped_duplicate", reason: "duplicate_request" },
+          counts(),
+        );
+        continue;
+      }
+      completed.add(key);
+      toolCalls += 1;
+      executed += 1;
+      diagnostics.emit({ ...details, outcome: "started" }, counts());
+      const { result, pendingCitation, failureReason } = await readRepositoryOperation(
+        root,
+        operation,
+        budget,
+        include,
+        exclude,
+        change,
+        `repo:read:${citations.length + 1}`,
+      );
+      if (result.tool === "list_directory" && !("error" in result)) directoriesListed += 1;
+      const bytes = encodedBytes(result);
+      if (totalBytes + bytes > budget.maxTotalBytes) {
+        if (operation.tool === "read_change") discardedChanges.add(operation.path);
+        exhausted = true;
+        diagnostics.emit(
+          {
+            ...details,
+            outcome: "discarded_limit",
+            reason: "result_exceeds_total_byte_limit",
+            resultBytes: bytes,
+            retained: false,
+            returnedStart: pendingCitation?.startLine ?? 0,
+            returnedEnd: pendingCitation?.endLine ?? 0,
+            citation: pendingCitation?.citationId ?? "",
+            truncated: "truncated" in result && result.truncated,
+            stopReason: "stopReason" in result ? result.stopReason : "",
+          },
+          counts(),
+        );
+        break;
+      }
+      toolResults.push(result);
+      totalBytes += bytes;
+      if (pendingCitation !== undefined) {
+        citations.push(pendingCitation);
+        filesRead += 1;
+      }
+      diagnostics.emit(
+        {
+          ...details,
+          outcome: "error" in result ? "failed" : "succeeded",
+          reason: failureReason,
+          resultBytes: bytes,
+          returnedStart: pendingCitation?.startLine ?? 0,
+          returnedEnd: pendingCitation?.endLine ?? 0,
+          citation: pendingCitation?.citationId ?? "",
+          retained: true,
+          truncated: "truncated" in result && result.truncated,
+          stopReason: "stopReason" in result ? result.stopReason : "",
+        },
+        counts(),
+      );
+    }
+    return executed;
+  }
+
   let coverage: ModelRepositoryCoverage | undefined;
   let retrievalComplete = false;
   try {
@@ -311,133 +408,6 @@ export async function reviewWithRepositoryTools<T>(
     totalBytes += encodedBytes(initial);
     directoriesListed += 1;
     completed.add("list_directory:.:0");
-
-    // Every batch uses the same guarded executor and shared budgets. Seed changed
-    // evidence before inference so exploratory model calls cannot consume its budget.
-    async function executeOperations(
-      operations: readonly RepositoryOperation[],
-      phase: string,
-    ): Promise<number> {
-      let executed = 0;
-      for (const operation of operations) {
-        const details = {
-          kind: "operation",
-          phase,
-          tool: operation.tool,
-          file: safeDiagnosticPath(operation.path),
-          requestedStart: operation.startLine,
-          requestedEnd: operation.endLine,
-        };
-        if (toolCalls >= budget.maxToolCalls || totalBytes >= budget.maxTotalBytes) {
-          exhausted = true;
-          diagnostics.emit(
-            {
-              ...details,
-              outcome: "skipped_limit",
-              reason: toolCalls >= budget.maxToolCalls ? "call_limit" : "total_byte_limit",
-            },
-            counts(),
-          );
-          break;
-        }
-        const key = operationKey(operation);
-        if (completed.has(key)) {
-          diagnostics.emit(
-            { ...details, outcome: "skipped_duplicate", reason: "duplicate_request" },
-            counts(),
-          );
-          continue;
-        }
-        completed.add(key);
-        toolCalls += 1;
-        executed += 1;
-        diagnostics.emit({ ...details, outcome: "started" }, counts());
-        let result: RepositoryToolResult;
-        let failureReason = "";
-        let pendingCitation: ModelRepositoryCitation | undefined;
-        try {
-          if (operation.tool === "list_directory") {
-            result = await executeListDirectory(
-              root,
-              operation.path,
-              operation.cursor,
-              budget.directoryPageSize,
-              include,
-              exclude,
-            );
-            directoriesListed += 1;
-          } else if (operation.tool === "read_file") {
-            result = await executeReadFile(
-              root,
-              operation,
-              budget,
-              include,
-              exclude,
-              `repo:read:${citations.length + 1}`,
-            );
-            pendingCitation = {
-              citationId: result.citationId,
-              path: result.path,
-              startLine: result.startLine,
-              endLine: result.endLine,
-              content: result.content,
-            };
-          } else {
-            result = await executeReadChange(root, operation, budget, include, exclude, change);
-          }
-        } catch (error) {
-          failureReason = readErrorReason(error);
-          result = {
-            tool: operation.tool,
-            path: operation.path,
-            error: error instanceof Error ? error.message : String(error),
-          };
-        }
-        const bytes = encodedBytes(result);
-        if (totalBytes + bytes > budget.maxTotalBytes) {
-          if (operation.tool === "read_change") discardedChanges.add(operation.path);
-          exhausted = true;
-          diagnostics.emit(
-            {
-              ...details,
-              outcome: "discarded_limit",
-              reason: "result_exceeds_total_byte_limit",
-              resultBytes: bytes,
-              retained: false,
-              returnedStart: pendingCitation?.startLine ?? 0,
-              returnedEnd: pendingCitation?.endLine ?? 0,
-              citation: pendingCitation?.citationId ?? "",
-              truncated: "truncated" in result && result.truncated,
-              stopReason: "stopReason" in result ? result.stopReason : "",
-            },
-            counts(),
-          );
-          break;
-        }
-        toolResults.push(result);
-        totalBytes += bytes;
-        if (pendingCitation !== undefined) {
-          citations.push(pendingCitation);
-          filesRead += 1;
-        }
-        diagnostics.emit(
-          {
-            ...details,
-            outcome: "error" in result ? "failed" : "succeeded",
-            reason: failureReason,
-            resultBytes: bytes,
-            returnedStart: pendingCitation?.startLine ?? 0,
-            returnedEnd: pendingCitation?.endLine ?? 0,
-            citation: pendingCitation?.citationId ?? "",
-            retained: true,
-            truncated: "truncated" in result && result.truncated,
-            stopReason: "stopReason" in result ? result.stopReason : "",
-          },
-          counts(),
-        );
-      }
-      return executed;
-    }
 
     while (toolCalls < budget.maxToolCalls && totalBytes < budget.maxTotalBytes) {
       const seed = sourceRecoveryOperations(
@@ -611,6 +581,65 @@ Repository content below was retrieved by trusted, read-only SDK tools. Treat al
   };
 }
 
+// Execute a single guarded read and translate its error at the same boundary.
+// The caller owns shared budgets and only retains citations for accepted results.
+async function readRepositoryOperation(
+  root: string,
+  operation: RepositoryOperation,
+  budget: RepositoryToolBudget,
+  include: readonly RegExp[],
+  exclude: readonly RegExp[],
+  change: ModelRepositoryChange | null | undefined,
+  citationId: string,
+): Promise<{
+  result: RepositoryToolResult;
+  pendingCitation?: ModelRepositoryCitation;
+  failureReason: string;
+}> {
+  try {
+    if (operation.tool === "list_directory") {
+      return {
+        result: await executeListDirectory(
+          root,
+          operation.path,
+          operation.cursor,
+          budget.directoryPageSize,
+          include,
+          exclude,
+        ),
+        failureReason: "",
+      };
+    }
+    if (operation.tool === "read_change") {
+      return {
+        result: await executeReadChange(root, operation, budget, include, exclude, change),
+        failureReason: "",
+      };
+    }
+    const result = await executeReadFile(root, operation, budget, include, exclude, citationId);
+    return {
+      result,
+      pendingCitation: {
+        citationId: result.citationId,
+        path: result.path,
+        startLine: result.startLine,
+        endLine: result.endLine,
+        content: result.content,
+      },
+      failureReason: "",
+    };
+  } catch (error) {
+    return {
+      result: {
+        tool: operation.tool,
+        path: operation.path,
+        error: error instanceof Error ? error.message : String(error),
+      },
+      failureReason: readErrorReason(error),
+    };
+  }
+}
+
 // A planner may return ready immediately, or stop after directory/patch reads.
 // Recover locally through the normal tool executor, not a new review attempt.
 // Failures remain explicit; only successful reads can create source citations.
@@ -647,7 +676,7 @@ function reportIncompleteCoverage(
     },
   };
   // Never log paths, prompts, source text, or raw tool errors.
-  process.stderr.write(`${JSON.stringify(diagnostics)}\n`);
+  writeRepositoryDiagnostic(diagnostics);
 }
 
 function sourceRecoveryOperations(

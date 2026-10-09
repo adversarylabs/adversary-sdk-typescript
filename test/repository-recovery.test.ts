@@ -9,6 +9,55 @@ import {
   reviewWithRepositoryTools,
 } from "../src/repository-model.js";
 
+it.each(["complete", "partial"])(
+  "broken diagnostic stderr preserves a %s review",
+  async (status) => {
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation((line) => {
+      if (String(line).includes('"event":"repository.')) {
+        throw new Error("diagnostic sink unavailable");
+      }
+      return true;
+    });
+    try {
+      const { result, finalCalls } = await fixture(undefined, {
+        readDiagnostics: true,
+        ...(status === "partial" ? { maxToolCalls: 1 } : {}),
+      });
+      expect(result.output).toEqual({ findings: [] });
+      expect(result.retrieval?.coverage?.status).toBe(status);
+      expect(finalCalls).toBe(1);
+    } finally {
+      spy.mockRestore();
+    }
+  },
+);
+
+it("broken diagnostic stderr does not replace the original planning error", async () => {
+  const root = await mkdtemp(join(tmpdir(), "sdk-broken-diagnostic-"));
+  const error = new Error("original provider error");
+  const spy = vi.spyOn(process.stderr, "write").mockImplementation(() => {
+    throw new Error("diagnostic sink unavailable");
+  });
+  const model: ReviewModel = {
+    async review() {
+      throw error;
+    },
+  };
+  try {
+    await expect(
+      reviewWithRepositoryTools(model, root, {
+        prompt: "Review",
+        input: {},
+        schema: { type: "object" },
+        tools: { repository: { readDiagnostics: true } },
+      }),
+    ).rejects.toBe(error);
+  } finally {
+    spy.mockRestore();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 it.each(["provider error", "invalid plan"])(
   "finishes diagnostics when retrieval stops on %s",
   async (failure) => {

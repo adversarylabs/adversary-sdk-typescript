@@ -42,6 +42,15 @@ export function safeDiagnosticPath(path: string): string {
   return normalizeRepositoryPath(path) ?? "[invalid repository path]";
 }
 
+/** Optional diagnostics must never alter a review result or replace its error. */
+export function writeRepositoryDiagnostic(record: Record<string, unknown>): void {
+  try {
+    process.stderr.write(`${JSON.stringify(record)}\n`);
+  } catch {
+    // A failed diagnostic sink does not affect repository retrieval.
+  }
+}
+
 type Counts = { rounds: number; toolCalls: number; bytes: number };
 type Limits = {
   maxRounds: number;
@@ -65,18 +74,16 @@ export function repositoryDiagnostics(
       omitted++;
       return;
     }
-    process.stderr.write(
-      `${JSON.stringify({
-        event: "repository.read-detail",
-        readingId,
-        reviewer:
-          reviewer && /^[A-Za-z0-9][A-Za-z0-9._/-]{0,95}$/.test(reviewer) ? reviewer : "unknown",
-        ...details,
-        ...counts,
-        callsRemaining: Math.max(0, limits.maxToolCalls - counts.toolCalls),
-        bytesRemaining: Math.max(0, limits.maxTotalBytes - counts.bytes),
-      })}\n`,
-    );
+    writeRepositoryDiagnostic({
+      event: "repository.read-detail",
+      readingId,
+      reviewer:
+        reviewer && /^[A-Za-z0-9][A-Za-z0-9._/-]{0,95}$/.test(reviewer) ? reviewer : "unknown",
+      ...details,
+      ...counts,
+      callsRemaining: Math.max(0, limits.maxToolCalls - counts.toolCalls),
+      bytesRemaining: Math.max(0, limits.maxTotalBytes - counts.bytes),
+    });
   };
   return {
     readingId,
