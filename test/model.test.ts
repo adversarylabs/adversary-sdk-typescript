@@ -19,6 +19,61 @@ import {
 
 const servers: ReturnType<typeof createServer>[] = [];
 
+it.each([false, true])(
+  "normalizes a response-body failure (deadline fired=%s)",
+  async (deadlineFired) => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (_input, init) =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              const fail = () => controller.error(new TypeError("body stream failed"));
+              if (deadlineFired && !init?.signal?.aborted) {
+                init?.signal?.addEventListener("abort", fail, { once: true });
+              } else fail();
+            },
+          }),
+        ),
+    );
+    try {
+      const model = new BrokerReviewModel("http://127.0.0.1:43123", "secret", {
+        maximumAttempts: 1,
+      });
+      const request = model.review({
+        prompt: "Review",
+        input: {},
+        schema: { type: "object" },
+        budget: { timeoutMs: deadlineFired ? 10 : 5_000 },
+      });
+      await expect(request).rejects.toBeInstanceOf(ModelReviewError);
+      await expect(request).rejects.toMatchObject({
+        code: deadlineFired ? "model_timeout" : "broker_unavailable",
+        retryable: true,
+      });
+      expect(fetch).toHaveBeenCalledOnce();
+    } finally {
+      fetch.mockRestore();
+    }
+  },
+);
+
+it("keeps response size-limit failures typed and nonretryable", async () => {
+  const fetch = vi
+    .spyOn(globalThis, "fetch")
+    .mockResolvedValue(new Response("", { headers: { "content-length": String((4 << 20) + 1) } }));
+  try {
+    const model = new BrokerReviewModel("http://127.0.0.1:43123", "secret", {
+      initialRetryDelayMs: 0,
+    });
+    await expect(
+      model.review({ prompt: "Review", input: {}, schema: { type: "object" } }),
+    ).rejects.toMatchObject({ code: "model_response_too_large", retryable: false });
+    expect(fetch).toHaveBeenCalledOnce();
+  } finally {
+    fetch.mockRestore();
+  }
+});
+
 it.each([true, false])(
   "dispatcher cleanup failure preserves request outcome (success=%s)",
   async (success) => {

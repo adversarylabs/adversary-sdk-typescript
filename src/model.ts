@@ -308,23 +308,14 @@ export class BrokerReviewModel implements ReviewModel {
         dispatcher,
       } as RequestInit & { dispatcher: Dispatcher });
     } catch (error) {
-      if (signal.aborted) {
-        throw modelTimeoutError(normalized.budget.timeoutMs);
-      }
-      throw new ModelReviewError(
-        `Model broker request failed: ${error instanceof Error ? error.message : String(error)}`,
-        { code: "broker_unavailable", retryable: true },
-      );
+      throw brokerTransportError(error, signal, normalized.budget.timeoutMs);
     }
 
     let body: string;
     try {
       body = await readBoundedResponse(response);
     } catch (error) {
-      if (signal.aborted) {
-        throw modelTimeoutError(normalized.budget.timeoutMs);
-      }
-      throw error;
+      throw brokerTransportError(error, signal, normalized.budget.timeoutMs);
     }
     let decoded: unknown;
     try {
@@ -550,6 +541,19 @@ function requireIntegerRange(value: number, name: string, minimum: number, maxim
       code: "invalid_model_budget",
     });
   }
+}
+
+function brokerTransportError(
+  error: unknown,
+  signal: AbortSignal,
+  timeoutMs: number,
+): ModelReviewError {
+  if (signal.aborted) return modelTimeoutError(timeoutMs);
+  if (error instanceof ModelReviewError) return error;
+  return new ModelReviewError(
+    `Model broker request failed: ${error instanceof Error ? error.message : String(error)}`,
+    { code: "broker_unavailable", retryable: true },
+  );
 }
 
 async function readBoundedResponse(response: Response): Promise<string> {
