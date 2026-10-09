@@ -1130,3 +1130,18 @@ This replays the recorded source revision with a deterministic planner. Historic
 model responses, worker inputs, and the deployed worker revision were not retained
 in this fixture, so a successful source replay does not establish the original
 production incident's cause.
+
+Repository review callers can split large changes into bounded model passes with
+`tools.repository.changedFiles`. This must be a nonempty unique subset of the
+runner's changed paths (at most 500). Coverage and the change summary describe
+that batch; ordinary source reads still support cross-file dependencies. The
+caller must aggregate every batch and withhold a whole-change clean verdict if
+any batch is omitted or partial. This scope is not a repository exclusion.
+
+`read_change` returns `cursor` and `nextCursor` byte offsets. Start at zero and
+continue until `nextCursor === -1`. Pages preserve UTF-8 boundaries and recovery
+joins only a contiguous chain before interpreting hunk headers. A truncated page
+is recoverable, but a missing page or an exhausted budget still means partial
+coverage. Diff output is streamed into a bounded page buffer rather than captured
+in its entirety. `retrieval.limits` and fixed call/byte/round reason codes support
+coverage diagnostics without source text or raw errors.
