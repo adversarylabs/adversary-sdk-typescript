@@ -275,6 +275,16 @@ export async function reviewWithRepositoryTools<T>(
   const toolResults: RepositoryToolResult[] = [];
   const completed = new Set<string>();
   const discardedChanges = new Set<string>();
+  // Only runner-supplied paths and guarded filesystem results may enter logs.
+  const knownPaths = new Set<string>(["."]);
+  for (const path of change?.changedFiles.slice(0, 500) ?? []) {
+    const normalized = normalizeRepositoryPath(path);
+    if (normalized !== undefined) knownPaths.add(normalized);
+  }
+  const rememberDirectory = (result: DirectoryToolResult) => {
+    knownPaths.add(result.path);
+    for (const entry of result.entries) knownPaths.add(entry.path);
+  };
   let rounds = 0;
   let toolCalls = 0;
   let totalBytes = 0;
@@ -300,7 +310,7 @@ export async function reviewWithRepositoryTools<T>(
         kind: "operation",
         phase,
         tool: operation.tool,
-        file: safeDiagnosticPath(operation.path),
+        file: safeDiagnosticPath(operation.path, knownPaths),
         requestedStart: operation.startLine,
         requestedEnd: operation.endLine,
       };
@@ -337,7 +347,14 @@ export async function reviewWithRepositoryTools<T>(
         change,
         `repo:read:${citations.length + 1}`,
       );
-      if (result.tool === "list_directory" && !("error" in result)) directoriesListed += 1;
+      if (!("error" in result) && "path" in result) {
+        knownPaths.add(result.path);
+        details.file = safeDiagnosticPath(result.path, knownPaths);
+        if (result.tool === "list_directory") {
+          directoriesListed += 1;
+          rememberDirectory(result);
+        }
+      }
       const bytes = encodedBytes(result);
       if (totalBytes + bytes > budget.maxTotalBytes) {
         if (operation.tool === "read_change" && "path" in result) {
@@ -407,6 +424,7 @@ export async function reviewWithRepositoryTools<T>(
       await executeListDirectory(root, ".", 0, budget.directoryPageSize, include, exclude),
       budget.maxTotalBytes,
     );
+    rememberDirectory(initial);
     toolResults.push(initial);
     totalBytes += encodedBytes(initial);
     directoriesListed += 1;
@@ -1194,7 +1212,8 @@ function reportMissingReads(
   emit: (details: Record<string, string | number | boolean>) => void,
 ): void {
   for (const path of new Set(change?.changedFiles.slice(0, 500) ?? [])) {
-    const file = safeDiagnosticPath(path);
+    const normalized = normalizeRepositoryPath(path);
+    const file = safeDiagnosticPath(path, new Set(normalized === undefined ? [] : [normalized]));
     const gap = (reason: string, start = 0, end = 0) =>
       emit({
         kind: "gap",

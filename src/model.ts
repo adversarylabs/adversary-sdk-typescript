@@ -1,5 +1,6 @@
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { Agent, type Dispatcher } from "undici";
+import { modelAttemptDiagnostics } from "./model-diagnostics.js";
 import type {
   ModelRepositoryCitation,
   ModelRepositoryRetrieval,
@@ -243,14 +244,24 @@ export class BrokerReviewModel implements ReviewModel {
       );
     }
     const normalized = normalizeRequest(request);
+    const diagnostics = modelAttemptDiagnostics(normalized.budget.timeoutMs);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), normalized.budget.timeoutMs);
     const dispatcher = new ModelBrokerDispatcher(normalized.budget.timeoutMs);
     try {
       for (let attempt = 1; attempt <= this.#maximumAttempts; attempt += 1) {
+        const finish = diagnostics.start(attempt);
         try {
-          return await this.#reviewOnce<T>(normalized, controller.signal, dispatcher);
+          const result = await this.#reviewOnce<T>(normalized, controller.signal, dispatcher);
+          finish("succeeded", result.provider, result.model);
+          return result;
         } catch (error) {
+          finish(
+            "failed",
+            undefined,
+            undefined,
+            error instanceof ModelReviewError ? error.code : "broker_unavailable",
+          );
           if (
             !(error instanceof ModelReviewError) ||
             !error.retryable ||

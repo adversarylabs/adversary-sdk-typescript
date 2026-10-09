@@ -813,3 +813,25 @@ it("preserves an explicit shorter repository planning timeout", async () => {
   const { requests } = await fixture(undefined, { planningTimeoutMs: 1_234 });
   expect(requests[0]?.budget?.timeoutMs).toBe(1_234);
 });
+
+it("does not log free text supplied as a model operation path", async () => {
+  const log = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+  try {
+    await fixture(
+      undefined,
+      { readDiagnostics: true },
+      {
+        ready: false,
+        operations: [
+          { tool: "read_file", path: "private model text", cursor: 0, startLine: 1, endLine: 2 },
+        ],
+      },
+    );
+    const output = log.mock.calls.map(([value]) => String(value)).join("");
+    expect(output).toContain("[unverified repository path]");
+    expect(output).not.toContain("private model text");
+    expect(output).toContain('"file":"source.ts"');
+  } finally {
+    log.mockRestore();
+  }
+});

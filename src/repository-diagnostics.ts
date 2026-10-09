@@ -38,8 +38,10 @@ export function readErrorReason(error: unknown): string {
   return typeof code === "string" && Object.hasOwn(codes, code) ? codes[code] : "read_failed";
 }
 
-export function safeDiagnosticPath(path: string): string {
-  return normalizeRepositoryPath(path) ?? "[invalid repository path]";
+export function safeDiagnosticPath(path: string, knownPaths: ReadonlySet<string>): string {
+  const normalized = normalizeRepositoryPath(path);
+  if (normalized === undefined) return "[invalid repository path]";
+  return knownPaths.has(normalized) ? normalized : "[unverified repository path]";
 }
 
 /** Optional diagnostics must never alter a review result or replace its error. */

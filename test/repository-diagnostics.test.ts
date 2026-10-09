@@ -14,9 +14,11 @@ it("classifies filesystem failures without exposing raw messages", () => {
   ).toBe("permission_denied");
   expect(readErrorReason({ code: "ENOENT" })).toBe("file_missing");
   expect(readErrorReason(new Error("private credentials in message"))).toBe("read_failed");
-  expect(safeDiagnosticPath("../secrets")).toBe("[invalid repository path]");
-  expect(safeDiagnosticPath("/private/secrets")).toBe("[invalid repository path]");
-  expect(safeDiagnosticPath("src/app/tags/[tag]/page.tsx")).toBe("src/app/tags/[tag]/page.tsx");
+  expect(safeDiagnosticPath("../secrets", new Set())).toBe("[invalid repository path]");
+  expect(safeDiagnosticPath("/private/secrets", new Set())).toBe("[invalid repository path]");
+  expect(
+    safeDiagnosticPath("src/app/tags/[tag]/page.tsx", new Set(["src/app/tags/[tag]/page.tsx"])),
+  ).toBe("src/app/tags/[tag]/page.tsx");
 });
 
 it("bounds records and reports when diagnostics were omitted", () => {
@@ -79,7 +81,9 @@ it("preserves the reader's bounded paths and labels invalid paths", () => {
     "./src/app/[slug]/page.ts",
     "a".repeat(MAX_OPERATION_PATH_LENGTH),
   ]) {
-    expect(safeDiagnosticPath(path)).toBe(normalizeRepositoryPath(path));
+    expect(safeDiagnosticPath(path, new Set([normalizeRepositoryPath(path) ?? ""]))).toBe(
+      normalizeRepositoryPath(path),
+    );
   }
   for (const path of [
     "a".repeat(MAX_OPERATION_PATH_LENGTH + 1),
@@ -88,6 +92,17 @@ it("preserves the reader's bounded paths and labels invalid paths", () => {
     "bad\0path",
   ]) {
     expect(normalizeRepositoryPath(path)).toBeUndefined();
-    expect(safeDiagnosticPath(path)).toBe("[invalid repository path]");
+    expect(safeDiagnosticPath(path, new Set([normalizeRepositoryPath(path) ?? ""]))).toBe(
+      "[invalid repository path]",
+    );
   }
+});
+
+it("redacts unverified model strings while preserving known filenames", () => {
+  const paths = new Set(["src/app/[tag]/page.tsx", "src/日本語 file.ts"]);
+  expect(safeDiagnosticPath("secret: arbitrary model text", paths)).toBe(
+    "[unverified repository path]",
+  );
+  expect(safeDiagnosticPath("./src/app/[tag]/page.tsx", paths)).toBe("src/app/[tag]/page.tsx");
+  expect(safeDiagnosticPath("src/日本語 file.ts", paths)).toBe("src/日本語 file.ts");
 });

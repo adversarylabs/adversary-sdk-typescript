@@ -19,6 +19,136 @@ import {
 
 const servers: ReturnType<typeof createServer>[] = [];
 
+it.each(["success", "retry", "timeout"])(
+  "records content-free per-attempt timing for %s",
+  async (outcome) => {
+    const log = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    vi.stubEnv("HOSTED_REVIEW_JOB_ID", "fixture-job");
+    vi.stubEnv("ADVERSARY_MODEL_PROVIDER", "configured-provider");
+    vi.stubEnv("ADVERSARY_MODEL", "configured-model");
+    let calls = 0;
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      calls++;
+      if (outcome === "timeout") {
+        await new Promise<void>((resolve) =>
+          init?.signal?.addEventListener("abort", () => resolve(), { once: true }),
+        );
+        throw new Error("private transport error");
+      }
+      if (outcome === "retry" && calls === 1) throw new Error("private transport error");
+      return new Response(
+        JSON.stringify({
+          protocolVersion: ADVERSARY_MODEL_PROTOCOL_VERSION,
+          provider: "actual-provider",
+          model: "actual-model",
+          output: {},
+        }),
+      );
+    });
+    try {
+      const deadlineMs = outcome === "timeout" ? 10 : 5000;
+      const model = new BrokerReviewModel("http://127.0.0.1:43123", "private-token", {
+        initialRetryDelayMs: 0,
+      });
+      const result = model.review({
+        prompt: "private-prompt",
+        input: { source: "private-source" },
+        schema: { type: "object" },
+        budget: { timeoutMs: deadlineMs },
+      });
+      if (outcome === "timeout")
+        await expect(result).rejects.toMatchObject({ code: "model_timeout" });
+      else await expect(result).resolves.toMatchObject({ output: {} });
+      const records = log.mock.calls.map(([value]) => JSON.parse(String(value)));
+      expect(records).toHaveLength(outcome === "retry" ? 4 : 2);
+      const terminals = records.filter((record) => record.outcome !== "started");
+      expect(terminals.map((record) => record.attempt)).toEqual(outcome === "retry" ? [1, 2] : [1]);
+      expect(new Set(records.map((record) => record.requestId)).size).toBe(1);
+      for (const record of records) {
+        expect(record).toMatchObject({
+          event: "model.attempt",
+          jobId: "fixture-job",
+          stage: "model_review",
+          deadlineMs,
+        });
+        expect(record.elapsedMs).toBeGreaterThanOrEqual(0);
+        expect(record.remainingDeadlineMs).toBeLessThanOrEqual(deadlineMs);
+      }
+      expect(terminals.at(-1)).toMatchObject(
+        outcome === "timeout"
+          ? {
+              outcome: "failed",
+              failureCode: "model_timeout",
+              provider: "configured-provider",
+              model: "configured-model",
+            }
+          : { outcome: "succeeded", provider: "actual-provider", model: "actual-model" },
+      );
+      expect(JSON.stringify(records)).not.toMatch(/private-|43123|"source"|"prompt"|"token"/i);
+      expect(calls).toBe(outcome === "retry" ? 2 : 1);
+    } finally {
+      fetch.mockRestore();
+      log.mockRestore();
+      vi.unstubAllEnvs();
+    }
+  },
+);
+
+it("redacts arbitrary broker failure codes in timing records", async () => {
+  const log = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+  const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    new Response(
+      JSON.stringify({
+        error: { code: "private source content", message: "private message", retryable: false },
+      }),
+      { status: 400 },
+    ),
+  );
+  try {
+    await expect(
+      new BrokerReviewModel("http://127.0.0.1:43123", "secret").review({
+        prompt: "Review",
+        input: {},
+        schema: { type: "object" },
+      }),
+    ).rejects.toMatchObject({ code: "private source content" });
+    const output = log.mock.calls.map(([value]) => String(value)).join("");
+    expect(output).toContain('"failureCode":"model_review_failed"');
+    expect(output).not.toContain("private");
+  } finally {
+    fetch.mockRestore();
+    log.mockRestore();
+  }
+});
+
+it("a broken timing sink preserves broker success", async () => {
+  const log = vi.spyOn(process.stderr, "write").mockImplementation(() => {
+    throw new Error("sink failed");
+  });
+  const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    new Response(
+      JSON.stringify({
+        protocolVersion: ADVERSARY_MODEL_PROTOCOL_VERSION,
+        provider: "fixture",
+        model: "fixture",
+        output: {},
+      }),
+    ),
+  );
+  try {
+    await expect(
+      new BrokerReviewModel("http://127.0.0.1:43123", "secret").review({
+        prompt: "Review",
+        input: {},
+        schema: { type: "object" },
+      }),
+    ).resolves.toMatchObject({ output: {} });
+  } finally {
+    fetch.mockRestore();
+    log.mockRestore();
+  }
+});
+
 it.each([false, true])(
   "normalizes a response-body failure (deadline fired=%s)",
   async (deadlineFired) => {
