@@ -4,7 +4,6 @@ import { lstat, readdir, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { promisify } from "node:util";
-import { readErrorReason, repositoryDiagnostics, safeDiagnosticPath } from "./repository-diagnostics.js";
 import {
   ModelReviewError,
   type ModelReviewRequest,
@@ -13,6 +12,11 @@ import {
   type ReviewModel,
   reviewWithValidation,
 } from "./model.js";
+import {
+  readErrorReason,
+  repositoryDiagnostics,
+  safeDiagnosticPath,
+} from "./repository-diagnostics.js";
 
 const DEFAULT_MAX_ROUNDS = 6;
 const MAX_MAX_ROUNDS = 16;
@@ -84,8 +88,8 @@ export interface ModelRepositoryCoverage {
 }
 
 export interface ModelRepositoryRetrieval {
-	/** Correlates source reads and missing-line diagnostics for this retrieval. */
-	readingId?: string;
+  /** Correlates source reads and missing-line diagnostics for this retrieval. */
+  readingId?: string;
   rounds: number;
   toolCalls: number;
   bytes: number;
@@ -303,19 +307,38 @@ export async function reviewWithRepositoryTools<T>(
 
   // Every batch uses the same guarded executor and shared budgets. Seed changed
   // evidence before inference so exploratory model calls cannot consume its budget.
-  async function executeOperations(operations: readonly RepositoryOperation[], phase: string): Promise<number> {
+  async function executeOperations(
+    operations: readonly RepositoryOperation[],
+    phase: string,
+  ): Promise<number> {
     let executed = 0;
     for (const operation of operations) {
-      const details = { kind: "operation", phase, tool: operation.tool,
-        file: safeDiagnosticPath(operation.path), requestedStart: operation.startLine, requestedEnd: operation.endLine };
+      const details = {
+        kind: "operation",
+        phase,
+        tool: operation.tool,
+        file: safeDiagnosticPath(operation.path),
+        requestedStart: operation.startLine,
+        requestedEnd: operation.endLine,
+      };
       if (toolCalls >= budget.maxToolCalls || totalBytes >= budget.maxTotalBytes) {
         exhausted = true;
-        diagnostics.emit({ ...details, outcome: "skipped_limit", reason: toolCalls >= budget.maxToolCalls ? "call_limit" : "total_byte_limit" }, counts());
+        diagnostics.emit(
+          {
+            ...details,
+            outcome: "skipped_limit",
+            reason: toolCalls >= budget.maxToolCalls ? "call_limit" : "total_byte_limit",
+          },
+          counts(),
+        );
         break;
       }
       const key = operationKey(operation);
       if (completed.has(key)) {
-        diagnostics.emit({ ...details, outcome: "skipped_duplicate", reason: "duplicate_request" }, counts());
+        diagnostics.emit(
+          { ...details, outcome: "skipped_duplicate", reason: "duplicate_request" },
+          counts(),
+        );
         continue;
       }
       completed.add(key);
@@ -366,10 +389,21 @@ export async function reviewWithRepositoryTools<T>(
       const bytes = encodedBytes(result);
       if (totalBytes + bytes > budget.maxTotalBytes) {
         exhausted = true;
-        diagnostics.emit({ ...details, outcome: "discarded_limit", reason: "result_exceeds_total_byte_limit", resultBytes: bytes, retained: false,
-          returnedStart: pendingCitation?.startLine ?? 0, returnedEnd: pendingCitation?.endLine ?? 0,
-          citation: pendingCitation?.citationId ?? "", truncated: "truncated" in result && result.truncated,
-          stopReason: "stopReason" in result ? result.stopReason : "" }, counts());
+        diagnostics.emit(
+          {
+            ...details,
+            outcome: "discarded_limit",
+            reason: "result_exceeds_total_byte_limit",
+            resultBytes: bytes,
+            retained: false,
+            returnedStart: pendingCitation?.startLine ?? 0,
+            returnedEnd: pendingCitation?.endLine ?? 0,
+            citation: pendingCitation?.citationId ?? "",
+            truncated: "truncated" in result && result.truncated,
+            stopReason: "stopReason" in result ? result.stopReason : "",
+          },
+          counts(),
+        );
         break;
       }
       toolResults.push(result);
@@ -378,12 +412,21 @@ export async function reviewWithRepositoryTools<T>(
         citations.push(pendingCitation);
         filesRead += 1;
       }
-      diagnostics.emit({ ...details, outcome: "error" in result ? "failed" : "succeeded",
-        reason: failureReason, resultBytes: bytes,
-        returnedStart: pendingCitation?.startLine ?? 0, returnedEnd: pendingCitation?.endLine ?? 0,
-        citation: pendingCitation?.citationId ?? "", retained: true,
-        truncated: "truncated" in result && result.truncated,
-        stopReason: "stopReason" in result ? result.stopReason : "" }, counts());
+      diagnostics.emit(
+        {
+          ...details,
+          outcome: "error" in result ? "failed" : "succeeded",
+          reason: failureReason,
+          resultBytes: bytes,
+          returnedStart: pendingCitation?.startLine ?? 0,
+          returnedEnd: pendingCitation?.endLine ?? 0,
+          citation: pendingCitation?.citationId ?? "",
+          retained: true,
+          truncated: "truncated" in result && result.truncated,
+          stopReason: "stopReason" in result ? result.stopReason : "",
+        },
+        counts(),
+      );
     }
     return executed;
   }
@@ -487,7 +530,10 @@ export async function reviewWithRepositoryTools<T>(
         ],
       }
     : undefined;
-  if (options.readDiagnostics === true) reportMissingReads(change, toolResults, include, exclude, (details) => diagnostics.emit(details, counts()));
+  if (options.readDiagnostics === true)
+    reportMissingReads(change, toolResults, include, exclude, (details) =>
+      diagnostics.emit(details, counts()),
+    );
   diagnostics.finish(counts(), coverage?.status !== "partial");
   if (coverage?.status === "partial") {
     reportIncompleteCoverage(
@@ -1055,29 +1101,84 @@ async function executeReadChange(
   const content = truncated
     ? new TextDecoder().decode(encoded.subarray(0, budget.maxBytesPerRead))
     : stdout;
-  const result: ChangeToolResult = { tool: "read_change", path: relativePath, baseRef, headRef, content, truncated, stopReason: truncated ? "per_read_byte_limit" : "patch_complete" };
+  const result: ChangeToolResult = {
+    tool: "read_change",
+    path: relativePath,
+    baseRef,
+    headRef,
+    content,
+    truncated,
+    stopReason: truncated ? "per_read_byte_limit" : "patch_complete",
+  };
   Object.defineProperty(result, "stopReason", { enumerable: false });
   return result;
 }
 
-function reportMissingReads(change: ModelRepositoryChange | null | undefined, results: readonly RepositoryToolResult[], include: readonly RegExp[], exclude: readonly RegExp[], emit: (details: Record<string, string | number | boolean>) => void): void {
+function reportMissingReads(
+  change: ModelRepositoryChange | null | undefined,
+  results: readonly RepositoryToolResult[],
+  include: readonly RegExp[],
+  exclude: readonly RegExp[],
+  emit: (details: Record<string, string | number | boolean>) => void,
+): void {
   for (const path of new Set(change?.changedFiles.slice(0, 500) ?? [])) {
     const file = safeDiagnosticPath(path);
-    const gap = (reason: string, start = 0, end = 0) => emit({ kind: "gap", outcome: "missing", file, reason, requestedStart: start, requestedEnd: end });
-    if (!isIncluded(path, include) || isExcluded(path, exclude)) { gap("excluded_file"); continue; }
-    const patch = results.find((r): r is ChangeToolResult => r.tool === "read_change" && r.path === path && "content" in r);
-    if (!patch) { gap(results.some(r => r.tool === "read_change" && r.path === path && "error" in r) ? "patch_read_failed" : "patch_not_requested"); continue; }
-    if (patch.truncated) { gap("patch_truncated"); continue; }
-    const sources = results.filter((r): r is ReadToolResult => r.tool === "read_file" && r.path === path && "citationId" in r);
-    const failed = results.some(r => r.tool === "read_file" && r.path === path && "error" in r);
+    const gap = (reason: string, start = 0, end = 0) =>
+      emit({
+        kind: "gap",
+        outcome: "missing",
+        file,
+        reason,
+        requestedStart: start,
+        requestedEnd: end,
+      });
+    if (!isIncluded(path, include) || isExcluded(path, exclude)) {
+      gap("excluded_file");
+      continue;
+    }
+    const patch = results.find(
+      (r): r is ChangeToolResult => r.tool === "read_change" && r.path === path && "content" in r,
+    );
+    if (!patch) {
+      gap(
+        results.some((r) => r.tool === "read_change" && r.path === path && "error" in r)
+          ? "patch_read_failed"
+          : "patch_not_requested",
+      );
+      continue;
+    }
+    if (patch.truncated) {
+      gap("patch_truncated");
+      continue;
+    }
+    const sources = results.filter(
+      (r): r is ReadToolResult => r.tool === "read_file" && r.path === path && "citationId" in r,
+    );
+    const failed = results.some((r) => r.tool === "read_file" && r.path === path && "error" in r);
     for (const hunk of patch.content.matchAll(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/gm)) {
-      const start = Number(hunk[1]), count = Number(hunk[2] ?? 1), end = start + count - 1;
+      const start = Number(hunk[1]);
+      const count = Number(hunk[2] ?? 1);
+      const end = start + count - 1;
       if (start < 1 || count <= 0 || start > 10_000_000 || count > 10_000_000) continue;
-      for (let line = start; line <= end;) {
-        const covered = sources.filter(r => r.startLine <= line && r.endLine >= line);
-        if (covered.length) { line = Math.max(...covered.map(r => r.endLine)) + 1; continue; }
-        const next = Math.min(end + 1, ...sources.filter(r => r.startLine > line).map(r => r.startLine));
-        gap(failed ? "file_read_failed" : sources.length ? "requested_lines_not_returned" : "file_not_read", line, next - 1);
+      for (let line = start; line <= end; ) {
+        const covered = sources.filter((r) => r.startLine <= line && r.endLine >= line);
+        if (covered.length) {
+          line = Math.max(...covered.map((r) => r.endLine)) + 1;
+          continue;
+        }
+        const next = Math.min(
+          end + 1,
+          ...sources.filter((r) => r.startLine > line).map((r) => r.startLine),
+        );
+        gap(
+          failed
+            ? "file_read_failed"
+            : sources.length
+              ? "requested_lines_not_returned"
+              : "file_not_read",
+          line,
+          next - 1,
+        );
         line = next;
       }
     }

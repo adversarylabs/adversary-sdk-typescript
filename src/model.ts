@@ -1,5 +1,5 @@
-import { Agent, type Dispatcher } from "undici";
 import { Ajv2020 } from "ajv/dist/2020.js";
+import { Agent, type Dispatcher } from "undici";
 import type {
   ModelRepositoryCitation,
   ModelRepositoryRetrieval,
@@ -33,12 +33,18 @@ class ModelBrokerDispatcher extends Agent {
     super();
   }
 
-  override dispatch(options: Dispatcher.DispatchOptions, handler: Dispatcher.DispatchHandlers): boolean {
-    return super.dispatch({
-      ...options,
-      headersTimeout: this.deadlineMs,
-      bodyTimeout: this.deadlineMs,
-    }, handler);
+  override dispatch(
+    options: Dispatcher.DispatchOptions,
+    handler: Dispatcher.DispatchHandlers,
+  ): boolean {
+    return super.dispatch(
+      {
+        ...options,
+        headersTimeout: this.deadlineMs,
+        bodyTimeout: this.deadlineMs,
+      },
+      handler,
+    );
   }
 }
 
