@@ -27,7 +27,12 @@
     "./schemas/adversary.review.v1": "./schemas/adversary.review.v1.schema.json",
     "./schemas/adversary.outcome-context.v1": "./schemas/adversary.outcome-context.v1.schema.json"
   },
-  "files": ["dist", "schemas", "templates", "README.md"],
+  "files": [
+    "dist",
+    "schemas",
+    "templates",
+    "README.md"
+  ],
   "engines": {
     "node": ">=22"
   },
@@ -48,6 +53,7 @@
   },
   "dependencies": {
     "ajv": "^8.20.0",
+    "undici": "^6.29.0",
     "yaml": "^2.8.1"
   }
 }

@@ -1,3 +1,4 @@
+import { Agent, type Dispatcher } from "undici";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import type {
   ModelRepositoryCitation,
@@ -23,6 +24,23 @@ const MAX_BROKER_RETRY_DELAY_MS = 5_000;
 const DEFAULT_VALIDATION_MAXIMUM_ATTEMPTS = 3;
 const MAX_VALIDATION_MAXIMUM_ATTEMPTS = 5;
 const MAX_VALIDATION_FEEDBACK_BYTES = 8 << 10;
+
+// Fetch supplies its own five-minute header timeout, overriding Agent defaults.
+// Override dispatch options for this review only; its shared AbortSignal remains
+// the authoritative deadline across connection, headers, body, and retries.
+class ModelBrokerDispatcher extends Agent {
+  constructor(private readonly deadlineMs: number) {
+    super();
+  }
+
+  override dispatch(options: Dispatcher.DispatchOptions, handler: Dispatcher.DispatchHandlers): boolean {
+    return super.dispatch({
+      ...options,
+      headersTimeout: this.deadlineMs,
+      bodyTimeout: this.deadlineMs,
+    }, handler);
+  }
+}
 
 export interface ModelReviewBudget {
   maximumOutputTokens?: number;
@@ -221,10 +239,11 @@ export class BrokerReviewModel implements ReviewModel {
     const normalized = normalizeRequest(request);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), normalized.budget.timeoutMs);
+    const dispatcher = new ModelBrokerDispatcher(normalized.budget.timeoutMs);
     try {
       for (let attempt = 1; attempt <= this.#maximumAttempts; attempt += 1) {
         try {
-          return await this.#reviewOnce<T>(normalized, controller.signal);
+          return await this.#reviewOnce<T>(normalized, controller.signal, dispatcher);
         } catch (error) {
           if (
             !(error instanceof ModelReviewError) ||
@@ -248,12 +267,14 @@ export class BrokerReviewModel implements ReviewModel {
       });
     } finally {
       clearTimeout(timeout);
+      await dispatcher.destroy();
     }
   }
 
   async #reviewOnce<T>(
     normalized: NormalizedModelReviewRequest,
     signal: AbortSignal,
+    dispatcher: ModelBrokerDispatcher,
   ): Promise<ModelReviewResult<T>> {
     let response: Response;
     try {
@@ -273,7 +294,8 @@ export class BrokerReviewModel implements ReviewModel {
           budget: normalized.budget,
         } satisfies ModelBrokerRequest),
         signal,
-      });
+        dispatcher,
+      } as RequestInit & { dispatcher: Dispatcher });
     } catch (error) {
       if (signal.aborted) {
         throw modelTimeoutError(normalized.budget.timeoutMs);

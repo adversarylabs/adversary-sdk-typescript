@@ -9,6 +9,44 @@ import {
   reviewWithRepositoryTools,
 } from "../src/repository-model.js";
 
+it("logs requested and returned ranges for route paths with brackets without logging source", async () => {
+  const logs: string[] = [];
+  const spy = vi.spyOn(process.stderr, "write").mockImplementation((line) => { logs.push(String(line)); return true; });
+  try {
+    const path = "src/app/tags/[tag]/page.tsx";
+    await fixture([path], { readDiagnostics: true }, { ready: true, operations: [] }, "private source line\nsecond\nthird\n", "old\nsecond\nthird\n", false, path);
+    const records = logs.join("").split("\n").filter(line => line.startsWith('{"event":"repository.read-detail"')).map(line => JSON.parse(line));
+    const read = records.find(r => r.tool === "read_file" && r.outcome === "succeeded");
+    expect(read).toMatchObject({ file: path, requestedStart: 1, requestedEnd: 3, returnedStart: 1, returnedEnd: 3, citation: "repo:read:1", retained: true, stopReason: "end_of_file" });
+    expect(records.every(r => r.readingId === read.readingId)).toBe(true);
+    expect(records.at(-1)).toMatchObject({ kind: "session", outcome: "finished", complete: true });
+    expect(logs.join("")).not.toContain("private source line");
+  } finally { spy.mockRestore(); }
+});
+
+it("logs a past-end-of-file read with the requested range and a fixed error", async () => {
+  const logs: string[] = [];
+  const spy = vi.spyOn(process.stderr, "write").mockImplementation((line) => { logs.push(String(line)); return true; });
+  try {
+    await fixture(undefined, { readDiagnostics: true }, { ready: false, operations: [{ tool: "read_file", path: "source.ts", cursor: 0, startLine: 999, endLine: 1000 }] });
+    const records = logs.join("").split("\n").filter(line => line.startsWith('{"event":"repository.read-detail"')).map(line => JSON.parse(line));
+    expect(records).toContainEqual(expect.objectContaining({ kind: "operation", outcome: "failed", reason: "range_past_eof", requestedStart: 999, requestedEnd: 1000, citation: "" }));
+  } finally { spy.mockRestore(); }
+});
+
+it("logs results discarded at the total text limit rather than claiming a retained read", async () => {
+  const logs: string[] = [];
+  const spy = vi.spyOn(process.stderr, "write").mockImplementation((line) => { logs.push(String(line)); return true; });
+  try {
+    await fixture(undefined, { readDiagnostics: true, maxTotalBytes: 4096, maxBytesPerRead: 64000 }, { ready: true, operations: [] }, "x".repeat(6000));
+    const records = logs.join("").split("\n").filter(line => line.startsWith('{"event":"repository.read-detail"')).map(line => JSON.parse(line));
+    expect(records).toContainEqual(expect.objectContaining({ outcome: "discarded_limit", reason: "result_exceeds_total_byte_limit", file: "source.ts" }));
+    expect(records).toContainEqual(expect.objectContaining({ kind: "gap", reason: "patch_not_requested", file: "source.ts" }));
+    expect(records.at(-1)).toMatchObject({ kind: "session", complete: false });
+    expect(logs.join("")).not.toContain("x".repeat(100));
+  } finally { spy.mockRestore(); }
+});
+
 async function fixture(
   changedFiles: string[] = ["source.ts"],
   options: ModelRepositoryToolOptions = {},

@@ -4,6 +4,7 @@ import { lstat, readdir, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { promisify } from "node:util";
+import { readErrorReason, repositoryDiagnostics, safeDiagnosticPath } from "./repository-diagnostics.js";
 import {
   ModelReviewError,
   type ModelReviewRequest,
@@ -46,6 +47,8 @@ const defaultExcludedSegments = new Set([
 ]);
 
 export interface ModelRepositoryToolOptions {
+  /** Emit bounded file-reading diagnostics without source contents or raw errors. */
+  readDiagnostics?: boolean;
   /** File globs the model may read. Empty means every regular non-excluded file. */
   include?: readonly string[];
   /** Additional file or directory globs hidden from repository tools. */
@@ -81,6 +84,8 @@ export interface ModelRepositoryCoverage {
 }
 
 export interface ModelRepositoryRetrieval {
+	/** Correlates source reads and missing-line diagnostics for this retrieval. */
+	readingId?: string;
   rounds: number;
   toolCalls: number;
   bytes: number;
@@ -156,6 +161,7 @@ interface DirectoryToolResult {
 interface ReadToolResult extends ModelRepositoryCitation {
   tool: "read_file";
   truncated: boolean;
+  stopReason: string;
 }
 
 interface ChangeSummaryToolResult {
@@ -174,6 +180,7 @@ interface ChangeToolResult {
   headRef: string;
   content: string;
   truncated: boolean;
+  stopReason: string;
 }
 
 interface ErrorToolResult {
@@ -268,6 +275,9 @@ export async function reviewWithRepositoryTools<T>(
   let ready = false;
   let sourceReadRecoveries = 0;
   let usage: ModelReviewUsage = {};
+  const diagnostics = repositoryDiagnostics(reviewer, budget, options.readDiagnostics === true);
+  diagnostics.start();
+  const counts = () => ({ rounds, toolCalls, bytes: totalBytes });
 
   if (change !== undefined && change !== null) {
     const summary: ChangeSummaryToolResult = {
@@ -293,19 +303,27 @@ export async function reviewWithRepositoryTools<T>(
 
   // Every batch uses the same guarded executor and shared budgets. Seed changed
   // evidence before inference so exploratory model calls cannot consume its budget.
-  async function executeOperations(operations: readonly RepositoryOperation[]): Promise<number> {
+  async function executeOperations(operations: readonly RepositoryOperation[], phase: string): Promise<number> {
     let executed = 0;
     for (const operation of operations) {
+      const details = { kind: "operation", phase, tool: operation.tool,
+        file: safeDiagnosticPath(operation.path), requestedStart: operation.startLine, requestedEnd: operation.endLine };
       if (toolCalls >= budget.maxToolCalls || totalBytes >= budget.maxTotalBytes) {
         exhausted = true;
+        diagnostics.emit({ ...details, outcome: "skipped_limit", reason: toolCalls >= budget.maxToolCalls ? "call_limit" : "total_byte_limit" }, counts());
         break;
       }
       const key = operationKey(operation);
-      if (completed.has(key)) continue;
+      if (completed.has(key)) {
+        diagnostics.emit({ ...details, outcome: "skipped_duplicate", reason: "duplicate_request" }, counts());
+        continue;
+      }
       completed.add(key);
       toolCalls += 1;
       executed += 1;
+      diagnostics.emit({ ...details, outcome: "started" }, counts());
       let result: RepositoryToolResult;
+      let failureReason = "";
       let pendingCitation: ModelRepositoryCitation | undefined;
       try {
         if (operation.tool === "list_directory") {
@@ -338,6 +356,7 @@ export async function reviewWithRepositoryTools<T>(
           result = await executeReadChange(root, operation, budget, include, exclude, change);
         }
       } catch (error) {
+        failureReason = readErrorReason(error);
         result = {
           tool: operation.tool,
           path: operation.path,
@@ -347,6 +366,10 @@ export async function reviewWithRepositoryTools<T>(
       const bytes = encodedBytes(result);
       if (totalBytes + bytes > budget.maxTotalBytes) {
         exhausted = true;
+        diagnostics.emit({ ...details, outcome: "discarded_limit", reason: "result_exceeds_total_byte_limit", resultBytes: bytes, retained: false,
+          returnedStart: pendingCitation?.startLine ?? 0, returnedEnd: pendingCitation?.endLine ?? 0,
+          citation: pendingCitation?.citationId ?? "", truncated: "truncated" in result && result.truncated,
+          stopReason: "stopReason" in result ? result.stopReason : "" }, counts());
         break;
       }
       toolResults.push(result);
@@ -355,6 +378,12 @@ export async function reviewWithRepositoryTools<T>(
         citations.push(pendingCitation);
         filesRead += 1;
       }
+      diagnostics.emit({ ...details, outcome: "error" in result ? "failed" : "succeeded",
+        reason: failureReason, resultBytes: bytes,
+        returnedStart: pendingCitation?.startLine ?? 0, returnedEnd: pendingCitation?.endLine ?? 0,
+        citation: pendingCitation?.citationId ?? "", retained: true,
+        truncated: "truncated" in result && result.truncated,
+        stopReason: "stopReason" in result ? result.stopReason : "" }, counts());
     }
     return executed;
   }
@@ -363,7 +392,7 @@ export async function reviewWithRepositoryTools<T>(
     const seed = sourceRecoveryOperations(change, toolResults, completed, budget, include, exclude);
     if (seed.complete || seed.operations.length === 0) break;
     sourceReadRecoveries += 1;
-    if ((await executeOperations(seed.operations)) === 0 || exhausted) break;
+    if ((await executeOperations(seed.operations, "seed")) === 0 || exhausted) break;
   }
 
   while (
@@ -422,7 +451,7 @@ export async function reviewWithRepositoryTools<T>(
       break;
     }
 
-    if ((await executeOperations(plan.operations)) === 0) break;
+    if ((await executeOperations(plan.operations, "planner")) === 0) break;
   }
   if (
     !ready &&
@@ -458,6 +487,8 @@ export async function reviewWithRepositoryTools<T>(
         ],
       }
     : undefined;
+  if (options.readDiagnostics === true) reportMissingReads(change, toolResults, include, exclude, (details) => diagnostics.emit(details, counts()));
+  diagnostics.finish(counts(), coverage?.status !== "partial");
   if (coverage?.status === "partial") {
     reportIncompleteCoverage(
       changedCoverage,
@@ -472,6 +503,7 @@ export async function reviewWithRepositoryTools<T>(
     citations.map((citation) => Object.freeze({ ...citation })),
   );
   const retrieval: ModelRepositoryRetrieval = {
+    ...(options.readDiagnostics === true ? { readingId: diagnostics.readingId } : {}),
     rounds,
     toolCalls,
     bytes: totalBytes,
@@ -905,18 +937,21 @@ async function executeReadFile(
   let lineNumber = 0;
   let bytes = 0;
   let truncated = endLine < operation.endLine;
+  let stopReason = "end_of_file";
   try {
     for await (const line of lines) {
       lineNumber += 1;
       if (lineNumber < operation.startLine) continue;
       if (lineNumber > endLine) {
         truncated = true;
+        stopReason = endLine < operation.endLine ? "line_limit" : "requested_end";
         break;
       }
       if (line.includes("\0")) throw new Error("read_file does not support binary content");
       const next = Buffer.byteLength(line, "utf8") + (selected.length === 0 ? 0 : 1);
       if (bytes + next > budget.maxBytesPerRead) {
         truncated = true;
+        stopReason = "per_read_byte_limit";
         break;
       }
       selected.push(line);
@@ -929,7 +964,7 @@ async function executeReadFile(
   if (selected.length === 0) {
     throw new Error(`read_file line ${operation.startLine} is beyond the available text`);
   }
-  return {
+  const result: ReadToolResult = {
     tool: "read_file",
     citationId,
     path: relativePath,
@@ -937,7 +972,11 @@ async function executeReadFile(
     endLine: operation.startLine + selected.length - 1,
     content: selected.join("\n"),
     truncated,
+    stopReason,
   };
+  // Diagnostic metadata must not consume the model's retrieved-text budget.
+  Object.defineProperty(result, "stopReason", { enumerable: false });
+  return result;
 }
 
 async function executeReadChange(
@@ -1016,7 +1055,33 @@ async function executeReadChange(
   const content = truncated
     ? new TextDecoder().decode(encoded.subarray(0, budget.maxBytesPerRead))
     : stdout;
-  return { tool: "read_change", path: relativePath, baseRef, headRef, content, truncated };
+  const result: ChangeToolResult = { tool: "read_change", path: relativePath, baseRef, headRef, content, truncated, stopReason: truncated ? "per_read_byte_limit" : "patch_complete" };
+  Object.defineProperty(result, "stopReason", { enumerable: false });
+  return result;
+}
+
+function reportMissingReads(change: ModelRepositoryChange | null | undefined, results: readonly RepositoryToolResult[], include: readonly RegExp[], exclude: readonly RegExp[], emit: (details: Record<string, string | number | boolean>) => void): void {
+  for (const path of new Set(change?.changedFiles.slice(0, 500) ?? [])) {
+    const file = safeDiagnosticPath(path);
+    const gap = (reason: string, start = 0, end = 0) => emit({ kind: "gap", outcome: "missing", file, reason, requestedStart: start, requestedEnd: end });
+    if (!isIncluded(path, include) || isExcluded(path, exclude)) { gap("excluded_file"); continue; }
+    const patch = results.find((r): r is ChangeToolResult => r.tool === "read_change" && r.path === path && "content" in r);
+    if (!patch) { gap(results.some(r => r.tool === "read_change" && r.path === path && "error" in r) ? "patch_read_failed" : "patch_not_requested"); continue; }
+    if (patch.truncated) { gap("patch_truncated"); continue; }
+    const sources = results.filter((r): r is ReadToolResult => r.tool === "read_file" && r.path === path && "citationId" in r);
+    const failed = results.some(r => r.tool === "read_file" && r.path === path && "error" in r);
+    for (const hunk of patch.content.matchAll(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/gm)) {
+      const start = Number(hunk[1]), count = Number(hunk[2] ?? 1), end = start + count - 1;
+      if (start < 1 || count <= 0 || start > 10_000_000 || count > 10_000_000) continue;
+      for (let line = start; line <= end;) {
+        const covered = sources.filter(r => r.startLine <= line && r.endLine >= line);
+        if (covered.length) { line = Math.max(...covered.map(r => r.endLine)) + 1; continue; }
+        const next = Math.min(end + 1, ...sources.filter(r => r.startLine > line).map(r => r.startLine));
+        gap(failed ? "file_read_failed" : sources.length ? "requested_lines_not_returned" : "file_not_read", line, next - 1);
+        line = next;
+      }
+    }
+  }
 }
 
 function validRevision(value: string): string {
