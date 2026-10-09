@@ -1,0 +1,31 @@
+package.json
+  s_7c5d81b8cb730b::t_3aa86a5d1eea7d 30
+src/model.ts
+  s_7c5d81b8cb730b::t_8ee6c939de3148 2,36-47
+src/repository-diagnostics.ts
+  s_7c5d81b8cb730b::t_6ec9993b067d68 6-13,20-24,28-31,37-50,55-66,69-70,73-88,90-97,102-103
+src/repository-model.ts
+  s_7c5d81b8cb730b::t_d4f1e4706b77f0 15-19,91-92,310-313,316-323,326-333,338-341,392-406,415-429,533-536,1104-1112,1117-1123,1126-1157,1159-1161,1163-1181
+test/inference-timeout.test.ts
+  s_7c5d81b8cb730b::t_78fcb13cc82f3a 65-66,71-80,82-84,88-98,100-103,107-119,122-124,126-131
+test/repository-diagnostics.test.ts
+  s_7c5d81b8cb730b::t_0fcadf983d4127 2-6,9-11,21-24,26-32,34-38,41-49
+test/repository-recovery.test.ts
+  s_7c5d81b8cb730b::t_f1de149968af49 14-17,20-45,48-50,55-58,60-87,92-95,97-117,120-122
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b5bb27875353b112caa657f5e1e03ce0c84c8761",
+  "prompts": {},
+  "sessions": {
+    "s_7c5d81b8cb730b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a11df8-8340-7172-a8ba-4dd1e59e7fb2",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Marc Campbell <marc.e.campbell@gmail.com>"
+    }
+  }
+}
