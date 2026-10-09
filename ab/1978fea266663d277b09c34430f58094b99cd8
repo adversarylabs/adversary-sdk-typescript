@@ -1,0 +1,33 @@
+README.md
+  s_7c5d81b8cb730b::t_b1cac3604bbef0 1076-1092
+src/model-diagnostics.ts
+  s_7c5d81b8cb730b::t_de8ad00edbb5ae 1-63
+src/model.ts
+  s_7c5d81b8cb730b::t_b6562d0ee3ce25 3,247,253,255-257,259-264
+src/repository-diagnostics.ts
+  s_7c5d81b8cb730b::t_4988188ced213b 41-44
+src/repository-model.ts
+  s_7c5d81b8cb730b::t_ba97e957a7f210 278-287,313,350-357,427,1215-1216
+test/model.test.ts
+  s_7c5d81b8cb730b::t_64f71989e3ae09 22-151
+test/repository-diagnostics.test.ts
+  s_7c5d81b8cb730b::t_2c8a8352f271a5 17-21,84-86,95-97,100-108
+test/repository-recovery.test.ts
+  s_7c5d81b8cb730b::t_9c47e3d20e0219 816-837
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ab1978fea266663d277b09c34430f58094b99cd8",
+  "prompts": {},
+  "sessions": {
+    "s_7c5d81b8cb730b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a11df8-8340-7172-a8ba-4dd1e59e7fb2",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Marc Campbell <marc.e.campbell@gmail.com>"
+    }
+  }
+}
