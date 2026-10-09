@@ -298,110 +298,116 @@ export async function reviewWithRepositoryTools<T>(
   diagnostics.start();
   const counts = () => ({ rounds, toolCalls, bytes: totalBytes });
 
-  // Every batch uses the same guarded executor and shared budgets. Seed changed
-  // evidence before inference so exploratory model calls cannot consume its budget.
+  // Batches only count executed reads and honor the operation's stop decision.
   async function executeOperations(
     operations: readonly RepositoryOperation[],
     phase: string,
   ): Promise<number> {
     let executed = 0;
     for (const operation of operations) {
-      const details = {
-        kind: "operation",
-        phase,
-        tool: operation.tool,
-        file: safeDiagnosticPath(operation.path, knownPaths),
-        requestedStart: operation.startLine,
-        requestedEnd: operation.endLine,
-      };
-      if (toolCalls >= budget.maxToolCalls || totalBytes >= budget.maxTotalBytes) {
-        exhausted = true;
-        diagnostics.emit(
-          {
-            ...details,
-            outcome: "skipped_limit",
-            reason: toolCalls >= budget.maxToolCalls ? "call_limit" : "total_byte_limit",
-          },
-          counts(),
-        );
-        break;
-      }
-      const key = operationKey(operation);
-      if (completed.has(key)) {
-        diagnostics.emit(
-          { ...details, outcome: "skipped_duplicate", reason: "duplicate_request" },
-          counts(),
-        );
-        continue;
-      }
-      completed.add(key);
-      toolCalls += 1;
-      executed += 1;
-      diagnostics.emit({ ...details, outcome: "started" }, counts());
-      const { result, pendingCitation, failureReason } = await readRepositoryOperation(
-        root,
-        operation,
-        budget,
-        include,
-        exclude,
-        change,
-        `repo:read:${citations.length + 1}`,
-      );
-      if (!("error" in result) && "path" in result) {
-        knownPaths.add(result.path);
-        details.file = safeDiagnosticPath(result.path, knownPaths);
-        if (result.tool === "list_directory") {
-          directoriesListed += 1;
-          rememberDirectory(result);
-        }
-      }
-      const bytes = encodedBytes(result);
-      if (totalBytes + bytes > budget.maxTotalBytes) {
-        if (operation.tool === "read_change" && "path" in result) {
-          // Successful reads return the canonical repository-relative path.
-          discardedChanges.add(normalizeRepositoryPath(result.path) ?? result.path);
-        }
-        exhausted = true;
-        diagnostics.emit(
-          {
-            ...details,
-            outcome: "discarded_limit",
-            reason: "result_exceeds_total_byte_limit",
-            resultBytes: bytes,
-            retained: false,
-            returnedStart: pendingCitation?.startLine ?? 0,
-            returnedEnd: pendingCitation?.endLine ?? 0,
-            citation: pendingCitation?.citationId ?? "",
-            truncated: "truncated" in result && result.truncated,
-            stopReason: "stopReason" in result ? result.stopReason : "",
-          },
-          counts(),
-        );
-        break;
-      }
-      toolResults.push(result);
-      totalBytes += bytes;
-      if (pendingCitation !== undefined) {
-        citations.push(pendingCitation);
-        filesRead += 1;
-      }
+      const outcome = await executeOperation(operation, phase);
+      if (outcome.executed) executed += 1;
+      if (outcome.stop) break;
+    }
+    return executed;
+  }
+
+  // One guarded operation owns limit checks, result retention, and diagnostics.
+  async function executeOperation(
+    operation: RepositoryOperation,
+    phase: string,
+  ): Promise<{ executed: boolean; stop: boolean }> {
+    const details = {
+      kind: "operation",
+      phase,
+      tool: operation.tool,
+      file: safeDiagnosticPath(operation.path, knownPaths),
+      requestedStart: operation.startLine,
+      requestedEnd: operation.endLine,
+    };
+    if (toolCalls >= budget.maxToolCalls || totalBytes >= budget.maxTotalBytes) {
+      exhausted = true;
       diagnostics.emit(
         {
           ...details,
-          outcome: "error" in result ? "failed" : "succeeded",
-          reason: failureReason,
-          resultBytes: bytes,
-          returnedStart: pendingCitation?.startLine ?? 0,
-          returnedEnd: pendingCitation?.endLine ?? 0,
-          citation: pendingCitation?.citationId ?? "",
-          retained: true,
-          truncated: "truncated" in result && result.truncated,
-          stopReason: "stopReason" in result ? result.stopReason : "",
+          outcome: "skipped_limit",
+          reason: toolCalls >= budget.maxToolCalls ? "call_limit" : "total_byte_limit",
         },
         counts(),
       );
+      return { executed: false, stop: true };
     }
-    return executed;
+    const key = operationKey(operation);
+    if (completed.has(key)) {
+      diagnostics.emit(
+        { ...details, outcome: "skipped_duplicate", reason: "duplicate_request" },
+        counts(),
+      );
+      return { executed: false, stop: false };
+    }
+    completed.add(key);
+    toolCalls += 1;
+    diagnostics.emit({ ...details, outcome: "started" }, counts());
+    const { result, pendingCitation, failureReason } = await readRepositoryOperation(
+      root,
+      operation,
+      budget,
+      include,
+      exclude,
+      change,
+      `repo:read:${citations.length + 1}`,
+    );
+    if (!("error" in result) && "path" in result) {
+      knownPaths.add(result.path);
+      details.file = safeDiagnosticPath(result.path, knownPaths);
+      if (result.tool === "list_directory") {
+        directoriesListed += 1;
+        rememberDirectory(result);
+      }
+    }
+    const bytes = encodedBytes(result);
+    const resultDetails = {
+      ...details,
+      resultBytes: bytes,
+      returnedStart: pendingCitation?.startLine ?? 0,
+      returnedEnd: pendingCitation?.endLine ?? 0,
+      citation: pendingCitation?.citationId ?? "",
+      truncated: "truncated" in result && result.truncated,
+      stopReason: "stopReason" in result ? result.stopReason : "",
+    };
+    if (totalBytes + bytes > budget.maxTotalBytes) {
+      if (operation.tool === "read_change" && "path" in result) {
+        // Successful reads return the canonical repository-relative path.
+        discardedChanges.add(normalizeRepositoryPath(result.path) ?? result.path);
+      }
+      exhausted = true;
+      diagnostics.emit(
+        {
+          ...resultDetails,
+          outcome: "discarded_limit",
+          reason: "result_exceeds_total_byte_limit",
+          retained: false,
+        },
+        counts(),
+      );
+      return { executed: true, stop: true };
+    }
+    toolResults.push(result);
+    totalBytes += bytes;
+    if (pendingCitation !== undefined) {
+      citations.push(pendingCitation);
+      filesRead += 1;
+    }
+    diagnostics.emit(
+      {
+        ...resultDetails,
+        outcome: "error" in result ? "failed" : "succeeded",
+        reason: failureReason,
+        retained: true,
+      },
+      counts(),
+    );
+    return { executed: true, stop: false };
   }
 
   let coverage: ModelRepositoryCoverage | undefined;
