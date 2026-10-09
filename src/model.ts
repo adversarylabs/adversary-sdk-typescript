@@ -259,43 +259,29 @@ export class BrokerReviewModel implements ReviewModel {
     const dispatcher = new ModelBrokerDispatcher(normalized.budget.timeoutMs);
     try {
       for (let attempt = 1; attempt <= this.#maximumAttempts; attempt += 1) {
-        const finish = diagnostics.start(attempt);
-        try {
-          const result = await this.#reviewOnce<T>(normalized, controller.signal, dispatcher);
-          finish("succeeded", result.provider, result.model);
-          return result;
-        } catch (error) {
-          finish(
-            "failed",
-            undefined,
-            undefined,
-            error instanceof ModelReviewError ? error.code : "broker_unavailable",
-          );
-          if (
-            !(error instanceof ModelReviewError) ||
-            !error.retryable ||
-            controller.signal.aborted ||
-            attempt === this.#maximumAttempts
-          ) {
-            throw error;
-          }
-          const exponential = Math.min(
-            MAX_BROKER_RETRY_DELAY_MS,
-            this.#initialRetryDelayMs * 2 ** (attempt - 1),
-          );
-          const jittered = Math.round(exponential * (0.75 + 0.5 * this.#random()));
-          const retryDelayFailed = diagnostics.startRetryDelay(attempt);
-          try {
-            await waitForRetry(jittered, controller.signal, normalized.budget.timeoutMs);
-          } catch (retryError) {
-            retryDelayFailed(
-              retryError instanceof ModelReviewError
-                ? (retryError.code ?? "model_review_failed")
-                : "model_review_failed",
-            );
-            throw retryError;
-          }
+        const outcome = await this.#reviewAttempt<T>(
+          normalized,
+          controller.signal,
+          dispatcher,
+          diagnostics,
+          attempt,
+        );
+        if (outcome.ok) return outcome.result;
+        const error = outcome.error;
+        if (
+          !(error instanceof ModelReviewError) ||
+          !error.retryable ||
+          controller.signal.aborted ||
+          attempt === this.#maximumAttempts
+        ) {
+          throw error;
         }
+        await this.#waitForRetry(
+          attempt,
+          controller.signal,
+          normalized.budget.timeoutMs,
+          diagnostics,
+        );
       }
       throw new ModelReviewError("Model broker retry loop exhausted unexpectedly.", {
         code: "broker_unavailable",
@@ -309,6 +295,55 @@ export class BrokerReviewModel implements ReviewModel {
       } catch {
         // The dispatcher is no longer used after this request.
       }
+    }
+  }
+
+  // One attempt owns its timing and error outcome; retry decisions belong to review().
+  async #reviewAttempt<T>(
+    normalized: NormalizedModelReviewRequest,
+    signal: AbortSignal,
+    dispatcher: ModelBrokerDispatcher,
+    diagnostics: ReturnType<typeof modelAttemptDiagnostics>,
+    attempt: number,
+  ): Promise<{ ok: true; result: ModelReviewResult<T> } | { ok: false; error: unknown }> {
+    const finish = diagnostics.start(attempt);
+    try {
+      const result = await this.#reviewOnce<T>(normalized, signal, dispatcher);
+      finish("succeeded", result.provider, result.model);
+      return { ok: true, result };
+    } catch (error) {
+      finish(
+        "failed",
+        undefined,
+        undefined,
+        error instanceof ModelReviewError ? error.code : "broker_unavailable",
+      );
+      return { ok: false, error };
+    }
+  }
+
+  // Keep backoff calculation and its terminal timeout diagnostic together.
+  async #waitForRetry(
+    attempt: number,
+    signal: AbortSignal,
+    timeoutMs: number,
+    diagnostics: ReturnType<typeof modelAttemptDiagnostics>,
+  ): Promise<void> {
+    const exponential = Math.min(
+      MAX_BROKER_RETRY_DELAY_MS,
+      this.#initialRetryDelayMs * 2 ** (attempt - 1),
+    );
+    const jittered = Math.round(exponential * (0.75 + 0.5 * this.#random()));
+    const retryDelayFailed = diagnostics.startRetryDelay(attempt);
+    try {
+      await waitForRetry(jittered, signal, timeoutMs);
+    } catch (error) {
+      retryDelayFailed(
+        error instanceof ModelReviewError
+          ? (error.code ?? "model_review_failed")
+          : "model_review_failed",
+      );
+      throw error;
     }
   }
 
