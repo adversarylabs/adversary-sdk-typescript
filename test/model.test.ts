@@ -4,12 +4,13 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { Agent } from "undici";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ADVERSARY_MODEL_PROTOCOL_VERSION,
   Adversary,
   BrokerReviewModel,
-  type ModelReviewError,
+  ModelReviewError,
   type ModelReviewRequest,
   ModelUnavailableError,
   type ReviewModel,
@@ -17,6 +18,288 @@ import {
 } from "../src/index.js";
 
 const servers: ReturnType<typeof createServer>[] = [];
+
+it.each(["success", "retry", "timeout", "planning"])(
+  "records content-free per-attempt timing for %s",
+  async (outcome) => {
+    const log = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    vi.stubEnv("HOSTED_REVIEW_JOB_ID", "fixture-job");
+    vi.stubEnv("ADVERSARY_MODEL_PROVIDER", "configured-provider");
+    vi.stubEnv("ADVERSARY_MODEL", "configured-model");
+    let calls = 0;
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      calls++;
+      expect(JSON.parse(String(init?.body))).not.toHaveProperty("diagnosticStage");
+      if (outcome === "timeout") {
+        await new Promise<void>((resolve) =>
+          init?.signal?.addEventListener("abort", () => resolve(), { once: true }),
+        );
+        throw new Error("private transport error");
+      }
+      if (outcome === "retry" && calls === 1) throw new Error("private transport error");
+      return new Response(
+        JSON.stringify({
+          protocolVersion: ADVERSARY_MODEL_PROTOCOL_VERSION,
+          provider: "actual-provider",
+          model: "actual-model",
+          output: {},
+        }),
+      );
+    });
+    try {
+      const deadlineMs = outcome === "timeout" ? 10 : 5000;
+      const model = new BrokerReviewModel("http://127.0.0.1:43123", "private-token", {
+        initialRetryDelayMs: 0,
+      });
+      const result = model.review({
+        diagnosticStage: outcome === "planning" ? "repository_planning" : "model_review",
+        prompt: "private-prompt",
+        input: { source: "private-source" },
+        schema: { type: "object" },
+        budget: { timeoutMs: deadlineMs },
+      });
+      if (outcome === "timeout")
+        await expect(result).rejects.toMatchObject({ code: "model_timeout" });
+      else await expect(result).resolves.toMatchObject({ output: {} });
+      const records = log.mock.calls.map(([value]) => JSON.parse(String(value)));
+      expect(records).toHaveLength(outcome === "retry" ? 4 : 2);
+      const terminals = records.filter((record) => record.outcome !== "started");
+      expect(terminals.map((record) => record.attempt)).toEqual(outcome === "retry" ? [1, 2] : [1]);
+      expect(new Set(records.map((record) => record.requestId)).size).toBe(1);
+      for (const record of records) {
+        expect(record).toMatchObject({
+          event: "model.attempt",
+          jobId: "fixture-job",
+          stage: outcome === "planning" ? "repository_planning" : "model_review",
+          deadlineMs,
+        });
+        expect(record.elapsedMs).toBeGreaterThanOrEqual(0);
+        expect(record.remainingDeadlineMs).toBeLessThanOrEqual(deadlineMs);
+      }
+      expect(terminals.at(-1)).toMatchObject(
+        outcome === "timeout"
+          ? {
+              outcome: "failed",
+              failureCode: "model_timeout",
+              provider: "configured-provider",
+              model: "configured-model",
+            }
+          : { outcome: "succeeded", provider: "actual-provider", model: "actual-model" },
+      );
+      expect(JSON.stringify(records)).not.toMatch(/private-|43123|"source"|"prompt"|"token"/i);
+      expect(calls).toBe(outcome === "retry" ? 2 : 1);
+    } finally {
+      fetch.mockRestore();
+      log.mockRestore();
+      vi.unstubAllEnvs();
+    }
+  },
+);
+
+it.each([false, true])(
+  "records a retry-delay timeout without another attempt (broken sink=%s)",
+  async (brokenSink) => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+    const logs: string[] = [];
+    const log = vi.spyOn(process.stderr, "write").mockImplementation((value) => {
+      logs.push(String(value));
+      if (brokenSink) throw new Error("sink failed");
+      return true;
+    });
+    const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("private error"));
+    try {
+      const model = new BrokerReviewModel("http://127.0.0.1:43123", "private-token", {
+        initialRetryDelayMs: 250,
+        random: () => 0.5,
+      });
+      const result = model.review({
+        prompt: "private-prompt",
+        input: { source: "private-source" },
+        schema: { type: "object" },
+        budget: { timeoutMs: 100 },
+      });
+      const rejected = expect(result).rejects.toMatchObject({
+        code: "model_timeout",
+        retryable: true,
+      });
+      await vi.advanceTimersByTimeAsync(100);
+      await rejected;
+      expect(fetch).toHaveBeenCalledOnce();
+      const events = logs.map((value) => JSON.parse(value));
+      expect(events).toHaveLength(3);
+      expect(events.filter((event) => event.event === "model.attempt")).toHaveLength(2);
+      expect(events.at(-1)).toMatchObject({
+        event: "model.retry-delay",
+        stage: "broker_retry_delay",
+        attempt: 1,
+        deadlineMs: 100,
+        remainingDeadlineMs: 100,
+        elapsedMs: 100,
+        outcome: "failed",
+        failureCode: "model_timeout",
+        requestId: events[0].requestId,
+      });
+      expect(logs.join("")).not.toMatch(/private|43123/);
+    } finally {
+      fetch.mockRestore();
+      log.mockRestore();
+      vi.useRealTimers();
+    }
+  },
+);
+
+it("redacts arbitrary broker failure codes in timing records", async () => {
+  const log = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+  const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    new Response(
+      JSON.stringify({
+        error: { code: "private source content", message: "private message", retryable: false },
+      }),
+      { status: 400 },
+    ),
+  );
+  try {
+    await expect(
+      new BrokerReviewModel("http://127.0.0.1:43123", "secret").review({
+        prompt: "Review",
+        input: {},
+        schema: { type: "object" },
+      }),
+    ).rejects.toMatchObject({ code: "private source content" });
+    const output = log.mock.calls.map(([value]) => String(value)).join("");
+    expect(output).toContain('"failureCode":"model_review_failed"');
+    expect(output).not.toContain("private");
+  } finally {
+    fetch.mockRestore();
+    log.mockRestore();
+  }
+});
+
+it("a broken timing sink preserves broker success", async () => {
+  const log = vi.spyOn(process.stderr, "write").mockImplementation(() => {
+    throw new Error("sink failed");
+  });
+  const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    new Response(
+      JSON.stringify({
+        protocolVersion: ADVERSARY_MODEL_PROTOCOL_VERSION,
+        provider: "fixture",
+        model: "fixture",
+        output: {},
+      }),
+    ),
+  );
+  try {
+    await expect(
+      new BrokerReviewModel("http://127.0.0.1:43123", "secret").review({
+        prompt: "Review",
+        input: {},
+        schema: { type: "object" },
+      }),
+    ).resolves.toMatchObject({ output: {} });
+  } finally {
+    fetch.mockRestore();
+    log.mockRestore();
+  }
+});
+
+it.each([false, true])(
+  "normalizes a response-body failure (deadline fired=%s)",
+  async (deadlineFired) => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (_input, init) =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              const fail = () => controller.error(new TypeError("body stream failed"));
+              if (deadlineFired && !init?.signal?.aborted) {
+                init?.signal?.addEventListener("abort", fail, { once: true });
+              } else fail();
+            },
+          }),
+        ),
+    );
+    try {
+      const model = new BrokerReviewModel("http://127.0.0.1:43123", "secret", {
+        maximumAttempts: 1,
+      });
+      const request = model.review({
+        prompt: "Review",
+        input: {},
+        schema: { type: "object" },
+        budget: { timeoutMs: deadlineFired ? 10 : 5_000 },
+      });
+      await expect(request).rejects.toBeInstanceOf(ModelReviewError);
+      await expect(request).rejects.toMatchObject({
+        code: deadlineFired ? "model_timeout" : "broker_unavailable",
+        retryable: true,
+      });
+      expect(fetch).toHaveBeenCalledOnce();
+    } finally {
+      fetch.mockRestore();
+    }
+  },
+);
+
+it("keeps response size-limit failures typed and nonretryable", async () => {
+  const fetch = vi
+    .spyOn(globalThis, "fetch")
+    .mockResolvedValue(new Response("", { headers: { "content-length": String((4 << 20) + 1) } }));
+  try {
+    const model = new BrokerReviewModel("http://127.0.0.1:43123", "secret", {
+      initialRetryDelayMs: 0,
+    });
+    await expect(
+      model.review({ prompt: "Review", input: {}, schema: { type: "object" } }),
+    ).rejects.toMatchObject({ code: "model_response_too_large", retryable: false });
+    expect(fetch).toHaveBeenCalledOnce();
+  } finally {
+    fetch.mockRestore();
+  }
+});
+
+it.each([true, false])(
+  "dispatcher cleanup failure preserves request outcome (success=%s)",
+  async (success) => {
+    const originalDestroy = Agent.prototype.destroy;
+    const cleanup = vi.spyOn(Agent.prototype, "destroy").mockImplementation(async function (
+      this: Agent,
+    ) {
+      await new Promise<void>((resolve, reject) => {
+        originalDestroy.call(this, null, (error) => (error ? reject(error) : resolve()));
+      });
+      throw new Error("cleanup failed");
+    });
+    try {
+      const server = createServer((_request, response) => {
+        response.setHeader("content-type", "application/json");
+        response.end(
+          JSON.stringify({
+            protocolVersion: ADVERSARY_MODEL_PROTOCOL_VERSION,
+            provider: "fixture",
+            model: "fixture",
+            output: success ? {} : null,
+          }),
+        );
+      });
+      servers.push(server);
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const model = new BrokerReviewModel(
+        `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+        "secret",
+      );
+      const result = model.review({ prompt: "Review", input: {}, schema: { type: "object" } });
+      if (success) await expect(result).resolves.toMatchObject({ output: {} });
+      else {
+        await expect(result).rejects.toBeInstanceOf(ModelReviewError);
+        await expect(result).rejects.toMatchObject({ code: "invalid_model_output" });
+      }
+      expect(cleanup).toHaveBeenCalledOnce();
+    } finally {
+      cleanup.mockRestore();
+    }
+  },
+);
 
 afterEach(async () => {
   await Promise.all(

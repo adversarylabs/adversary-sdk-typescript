@@ -1,4 +1,6 @@
 import { Ajv2020 } from "ajv/dist/2020.js";
+import { Agent, type Dispatcher } from "undici";
+import { modelAttemptDiagnostics } from "./model-diagnostics.js";
 import type {
   ModelRepositoryCitation,
   ModelRepositoryRetrieval,
@@ -24,6 +26,29 @@ const DEFAULT_VALIDATION_MAXIMUM_ATTEMPTS = 3;
 const MAX_VALIDATION_MAXIMUM_ATTEMPTS = 5;
 const MAX_VALIDATION_FEEDBACK_BYTES = 8 << 10;
 
+// Fetch supplies its own five-minute header timeout, overriding Agent defaults.
+// Override dispatch options for this review only; its shared AbortSignal remains
+// the authoritative deadline across connection, headers, body, and retries.
+class ModelBrokerDispatcher extends Agent {
+  constructor(private readonly deadlineMs: number) {
+    super({ connectTimeout: deadlineMs });
+  }
+
+  override dispatch(
+    options: Dispatcher.DispatchOptions,
+    handler: Dispatcher.DispatchHandlers,
+  ): boolean {
+    return super.dispatch(
+      {
+        ...options,
+        headersTimeout: this.deadlineMs,
+        bodyTimeout: this.deadlineMs,
+      },
+      handler,
+    );
+  }
+}
+
 export interface ModelReviewBudget {
   maximumOutputTokens?: number;
   timeoutMs?: number;
@@ -37,6 +62,8 @@ export interface ModelReviewValidation<T = unknown> {
 }
 
 export interface ModelReviewRequest<T = unknown> {
+  /** Local timing classification only; never sent to the broker or model. */
+  diagnosticStage?: "model_review" | "repository_planning";
   prompt: string;
   input: unknown;
   schema: Record<string, unknown>;
@@ -103,7 +130,8 @@ export type ContextualReviewModel = ReviewModel & {
 
 export type ModelEnvironment = Readonly<Record<string, string | undefined>>;
 
-interface ModelBrokerRequest extends Omit<ModelReviewRequest, "validation" | "tools"> {
+interface ModelBrokerRequest
+  extends Omit<ModelReviewRequest, "validation" | "tools" | "diagnosticStage"> {
   protocolVersion: typeof ADVERSARY_MODEL_PROTOCOL_VERSION;
 }
 
@@ -123,7 +151,10 @@ interface ModelBrokerErrorResponse {
   };
 }
 
-type NormalizedModelReviewRequest = Omit<ModelReviewRequest, "budget" | "validation" | "tools"> & {
+type NormalizedModelReviewRequest = Omit<
+  ModelReviewRequest,
+  "budget" | "validation" | "tools" | "diagnosticStage"
+> & {
   budget: Required<ModelReviewBudget>;
 };
 
@@ -219,28 +250,38 @@ export class BrokerReviewModel implements ReviewModel {
       );
     }
     const normalized = normalizeRequest(request);
+    const diagnostics = modelAttemptDiagnostics(
+      normalized.budget.timeoutMs,
+      request.diagnosticStage === "repository_planning" ? "repository_planning" : "model_review",
+    );
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), normalized.budget.timeoutMs);
+    const dispatcher = new ModelBrokerDispatcher(normalized.budget.timeoutMs);
     try {
       for (let attempt = 1; attempt <= this.#maximumAttempts; attempt += 1) {
-        try {
-          return await this.#reviewOnce<T>(normalized, controller.signal);
-        } catch (error) {
-          if (
-            !(error instanceof ModelReviewError) ||
-            !error.retryable ||
-            controller.signal.aborted ||
-            attempt === this.#maximumAttempts
-          ) {
-            throw error;
-          }
-          const exponential = Math.min(
-            MAX_BROKER_RETRY_DELAY_MS,
-            this.#initialRetryDelayMs * 2 ** (attempt - 1),
-          );
-          const jittered = Math.round(exponential * (0.75 + 0.5 * this.#random()));
-          await waitForRetry(jittered, controller.signal, normalized.budget.timeoutMs);
+        const outcome = await this.#reviewAttempt<T>(
+          normalized,
+          controller.signal,
+          dispatcher,
+          diagnostics,
+          attempt,
+        );
+        if (outcome.ok) return outcome.result;
+        const error = outcome.error;
+        if (
+          !(error instanceof ModelReviewError) ||
+          !error.retryable ||
+          controller.signal.aborted ||
+          attempt === this.#maximumAttempts
+        ) {
+          throw error;
         }
+        await this.#waitForRetry(
+          attempt,
+          controller.signal,
+          normalized.budget.timeoutMs,
+          diagnostics,
+        );
       }
       throw new ModelReviewError("Model broker retry loop exhausted unexpectedly.", {
         code: "broker_unavailable",
@@ -248,12 +289,68 @@ export class BrokerReviewModel implements ReviewModel {
       });
     } finally {
       clearTimeout(timeout);
+      // Cleanup must not replace the typed request error or a successful response.
+      try {
+        await dispatcher.destroy();
+      } catch {
+        // The dispatcher is no longer used after this request.
+      }
+    }
+  }
+
+  // One attempt owns its timing and error outcome; retry decisions belong to review().
+  async #reviewAttempt<T>(
+    normalized: NormalizedModelReviewRequest,
+    signal: AbortSignal,
+    dispatcher: ModelBrokerDispatcher,
+    diagnostics: ReturnType<typeof modelAttemptDiagnostics>,
+    attempt: number,
+  ): Promise<{ ok: true; result: ModelReviewResult<T> } | { ok: false; error: unknown }> {
+    const finish = diagnostics.start(attempt);
+    try {
+      const result = await this.#reviewOnce<T>(normalized, signal, dispatcher);
+      finish("succeeded", result.provider, result.model);
+      return { ok: true, result };
+    } catch (error) {
+      finish(
+        "failed",
+        undefined,
+        undefined,
+        error instanceof ModelReviewError ? error.code : "broker_unavailable",
+      );
+      return { ok: false, error };
+    }
+  }
+
+  // Keep backoff calculation and its terminal timeout diagnostic together.
+  async #waitForRetry(
+    attempt: number,
+    signal: AbortSignal,
+    timeoutMs: number,
+    diagnostics: ReturnType<typeof modelAttemptDiagnostics>,
+  ): Promise<void> {
+    const exponential = Math.min(
+      MAX_BROKER_RETRY_DELAY_MS,
+      this.#initialRetryDelayMs * 2 ** (attempt - 1),
+    );
+    const jittered = Math.round(exponential * (0.75 + 0.5 * this.#random()));
+    const retryDelayFailed = diagnostics.startRetryDelay(attempt);
+    try {
+      await waitForRetry(jittered, signal, timeoutMs);
+    } catch (error) {
+      retryDelayFailed(
+        error instanceof ModelReviewError
+          ? (error.code ?? "model_review_failed")
+          : "model_review_failed",
+      );
+      throw error;
     }
   }
 
   async #reviewOnce<T>(
     normalized: NormalizedModelReviewRequest,
     signal: AbortSignal,
+    dispatcher: ModelBrokerDispatcher,
   ): Promise<ModelReviewResult<T>> {
     let response: Response;
     try {
@@ -273,25 +370,17 @@ export class BrokerReviewModel implements ReviewModel {
           budget: normalized.budget,
         } satisfies ModelBrokerRequest),
         signal,
-      });
+        dispatcher,
+      } as RequestInit & { dispatcher: Dispatcher });
     } catch (error) {
-      if (signal.aborted) {
-        throw modelTimeoutError(normalized.budget.timeoutMs);
-      }
-      throw new ModelReviewError(
-        `Model broker request failed: ${error instanceof Error ? error.message : String(error)}`,
-        { code: "broker_unavailable", retryable: true },
-      );
+      throw brokerTransportError(error, signal, normalized.budget.timeoutMs);
     }
 
     let body: string;
     try {
       body = await readBoundedResponse(response);
     } catch (error) {
-      if (signal.aborted) {
-        throw modelTimeoutError(normalized.budget.timeoutMs);
-      }
-      throw error;
+      throw brokerTransportError(error, signal, normalized.budget.timeoutMs);
     }
     let decoded: unknown;
     try {
@@ -517,6 +606,19 @@ function requireIntegerRange(value: number, name: string, minimum: number, maxim
       code: "invalid_model_budget",
     });
   }
+}
+
+function brokerTransportError(
+  error: unknown,
+  signal: AbortSignal,
+  timeoutMs: number,
+): ModelReviewError {
+  if (signal.aborted) return modelTimeoutError(timeoutMs);
+  if (error instanceof ModelReviewError) return error;
+  return new ModelReviewError(
+    `Model broker request failed: ${error instanceof Error ? error.message : String(error)}`,
+    { code: "broker_unavailable", retryable: true },
+  );
 }
 
 async function readBoundedResponse(response: Response): Promise<string> {

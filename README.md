@@ -1073,6 +1073,29 @@ The event also includes job ID when available, reviewer identity, and retrieval-
 counts. Paths, prompts, source content, and raw tool errors are excluded from the event.
 The final model still receives ordinary tool results, including failed lookup results.
 
+`tools.repository.readDiagnostics: true` explicitly opts into bounded filename
+activity for debugging and the review UI. Unlike the default coverage event, these
+`repository.read-detail` events include filenames from the runner's changed-file
+list, directory results, or successful guarded reads. Unknown model-supplied paths
+are replaced with a placeholder. Valid route brackets, spaces, and Unicode names
+are preserved. Source contents, prompts, and raw errors remain excluded.
+
+Broker calls emit content-free `model.attempt` JSON events at the start and end of
+each attempt. They include a request correlation ID, job ID when available,
+provider/model identity, elapsed milliseconds, the shared deadline, remaining
+time at attempt start, and a typed failure code. Provider/model fields use the
+successful broker response or configured runner environment; unavailable identity
+is `unknown`. SDK timing does not change retries or deadlines and does not include
+endpoints, credentials, prompts, or source contents. If the deadline expires
+between attempts, a terminal `model.retry-delay` event identifies the
+`broker_retry_delay` stage and records the timeout without inventing another
+model attempt. Attempt events distinguish `repository_planning` calls from
+`model_review` calls, and retry-delay failures retain that classification in
+`modelStage`. The local `diagnosticStage` field never enters the broker payload.
+The parent broker's provider
+timing remains necessary to locate failures inside inference.
+
+
 ```typescript
 const review = await ctx.model.review<MyReview>({ /* prompt, schema, repository tools */ });
 if (review.retrieval?.coverage?.status === "partial") {

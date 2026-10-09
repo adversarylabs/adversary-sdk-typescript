@@ -9,6 +9,222 @@ import {
   reviewWithRepositoryTools,
 } from "../src/repository-model.js";
 
+it.each(["complete", "partial"])(
+  "broken diagnostic stderr preserves a %s review",
+  async (status) => {
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation((line) => {
+      if (String(line).includes('"event":"repository.')) {
+        throw new Error("diagnostic sink unavailable");
+      }
+      return true;
+    });
+    try {
+      const { result, finalCalls } = await fixture(undefined, {
+        readDiagnostics: true,
+        ...(status === "partial" ? { maxToolCalls: 1 } : {}),
+      });
+      expect(result.output).toEqual({ findings: [] });
+      expect(result.retrieval?.coverage?.status).toBe(status);
+      expect(finalCalls).toBe(1);
+    } finally {
+      spy.mockRestore();
+    }
+  },
+);
+
+it("broken diagnostic stderr does not replace the original planning error", async () => {
+  const root = await mkdtemp(join(tmpdir(), "sdk-broken-diagnostic-"));
+  const error = new Error("original provider error");
+  const spy = vi.spyOn(process.stderr, "write").mockImplementation(() => {
+    throw new Error("diagnostic sink unavailable");
+  });
+  const model: ReviewModel = {
+    async review() {
+      throw error;
+    },
+  };
+  try {
+    await expect(
+      reviewWithRepositoryTools(model, root, {
+        prompt: "Review",
+        input: {},
+        schema: { type: "object" },
+        tools: { repository: { readDiagnostics: true } },
+      }),
+    ).rejects.toBe(error);
+  } finally {
+    spy.mockRestore();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it.each(["provider error", "invalid plan"])(
+  "finishes diagnostics when retrieval stops on %s",
+  async (failure) => {
+    const root = await mkdtemp(join(tmpdir(), "sdk-diagnostic-failure-"));
+    const logs: string[] = [];
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation((line) => {
+      logs.push(String(line));
+      return true;
+    });
+    const error = new Error("provider failed");
+    const model: ReviewModel = {
+      async review<T>() {
+        if (failure === "provider error") throw error;
+        return { output: null as T };
+      },
+    };
+    try {
+      await expect(
+        reviewWithRepositoryTools(model, root, {
+          prompt: "Review",
+          input: {},
+          schema: { type: "object" },
+          tools: { repository: { readDiagnostics: true } },
+        }),
+      ).rejects.toThrow();
+      const records = logs
+        .join("")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(records.filter((record) => record.outcome === "finished")).toHaveLength(1);
+      expect(records.at(-1)).toMatchObject({
+        kind: "session",
+        outcome: "finished",
+        complete: false,
+        rounds: 1,
+      });
+    } finally {
+      spy.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
+it.each(["src/app/tags/[tag]/page.tsx", `${"a".repeat(160)}/${"b".repeat(110)}.ts`])(
+  "logs requested and returned ranges for %s without logging source",
+  async (path) => {
+    const logs: string[] = [];
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation((line) => {
+      logs.push(String(line));
+      return true;
+    });
+    try {
+      await fixture(
+        [path],
+        { readDiagnostics: true },
+        { ready: true, operations: [] },
+        "private source line\nsecond\nthird\n",
+        "old\nsecond\nthird\n",
+        false,
+        path,
+      );
+      const records = logs
+        .join("")
+        .split("\n")
+        .filter((line) => line.startsWith('{"event":"repository.read-detail"'))
+        .map((line) => JSON.parse(line));
+      const read = records.find((r) => r.tool === "read_file" && r.outcome === "succeeded");
+      expect(read).toMatchObject({
+        file: path,
+        requestedStart: 1,
+        requestedEnd: 3,
+        returnedStart: 1,
+        returnedEnd: 3,
+        citation: "repo:read:1",
+        retained: true,
+        stopReason: "end_of_file",
+      });
+      expect(records.every((r) => r.readingId === read.readingId)).toBe(true);
+      expect(records.at(-1)).toMatchObject({
+        kind: "session",
+        outcome: "finished",
+        complete: true,
+      });
+      expect(logs.join("")).not.toContain("private source line");
+    } finally {
+      spy.mockRestore();
+    }
+  },
+);
+
+it("logs a past-end-of-file read with the requested range and a fixed error", async () => {
+  const logs: string[] = [];
+  const spy = vi.spyOn(process.stderr, "write").mockImplementation((line) => {
+    logs.push(String(line));
+    return true;
+  });
+  try {
+    await fixture(
+      undefined,
+      { readDiagnostics: true },
+      {
+        ready: false,
+        operations: [
+          { tool: "read_file", path: "source.ts", cursor: 0, startLine: 999, endLine: 1000 },
+        ],
+      },
+    );
+    const records = logs
+      .join("")
+      .split("\n")
+      .filter((line) => line.startsWith('{"event":"repository.read-detail"'))
+      .map((line) => JSON.parse(line));
+    expect(records).toContainEqual(
+      expect.objectContaining({
+        kind: "operation",
+        outcome: "failed",
+        reason: "range_past_eof",
+        requestedStart: 999,
+        requestedEnd: 1000,
+        citation: "",
+      }),
+    );
+  } finally {
+    spy.mockRestore();
+  }
+});
+
+it("logs results discarded at the total text limit rather than claiming a retained read", async () => {
+  const logs: string[] = [];
+  const spy = vi.spyOn(process.stderr, "write").mockImplementation((line) => {
+    logs.push(String(line));
+    return true;
+  });
+  try {
+    await fixture(
+      undefined,
+      { readDiagnostics: true, maxTotalBytes: 4096, maxBytesPerRead: 64000 },
+      { ready: true, operations: [] },
+      "x".repeat(6000),
+    );
+    const records = logs
+      .join("")
+      .split("\n")
+      .filter((line) => line.startsWith('{"event":"repository.read-detail"'))
+      .map((line) => JSON.parse(line));
+    expect(records).toContainEqual(
+      expect.objectContaining({
+        outcome: "discarded_limit",
+        reason: "result_exceeds_total_byte_limit",
+        file: "source.ts",
+      }),
+    );
+    expect(records).toContainEqual(
+      expect.objectContaining({
+        kind: "gap",
+        reason: "patch_discarded_byte_limit",
+        file: "source.ts",
+      }),
+    );
+    expect(records.at(-1)).toMatchObject({ kind: "session", complete: false });
+    expect(logs.join("")).not.toContain("x".repeat(100));
+  } finally {
+    spy.mockRestore();
+  }
+});
+
 async function fixture(
   changedFiles: string[] = ["source.ts"],
   options: ModelRepositoryToolOptions = {},
@@ -596,4 +812,39 @@ it("reports byte exhaustion when initial context fills the budget before any pre
 it("preserves an explicit shorter repository planning timeout", async () => {
   const { requests } = await fixture(undefined, { planningTimeoutMs: 1_234 });
   expect(requests[0]?.budget?.timeoutMs).toBe(1_234);
+});
+
+it("does not log free text supplied as a model operation path", async () => {
+  const log = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+  try {
+    await fixture(
+      undefined,
+      { readDiagnostics: true },
+      {
+        ready: false,
+        operations: [
+          { tool: "read_file", path: "private model text", cursor: 0, startLine: 1, endLine: 2 },
+        ],
+      },
+    );
+    const output = log.mock.calls.map(([value]) => String(value)).join("");
+    expect(output).toContain("[unverified repository path]");
+    expect(output).not.toContain("private model text");
+    expect(output).toContain('"file":"source.ts"');
+  } finally {
+    log.mockRestore();
+  }
+});
+
+it("classifies repository planning separately from the final review", async () => {
+  const { requests, planningCalls, finalCalls } = await fixture();
+  expect(planningCalls).toBeGreaterThan(0);
+  expect(finalCalls).toBe(1);
+  for (const request of requests) {
+    expect(request.diagnosticStage).toBe(
+      request.prompt.startsWith("REPOSITORY RETRIEVAL CONTROLLER:")
+        ? "repository_planning"
+        : "model_review",
+    );
+  }
 });
