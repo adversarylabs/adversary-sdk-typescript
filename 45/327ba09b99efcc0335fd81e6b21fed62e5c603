@@ -1,0 +1,63 @@
+README.md
+  s_effac2b4965c4d::t_c97024771cb84e 153,158-162,211
+package-lock.json
+  s_effac2b4965c4d::t_3ed703fc676dc9 3,9
+  s_7c5d81b8cb730b::t_ce313368823059 13,1331-1339
+package.json
+  s_effac2b4965c4d::t_eae66ceba8e883 3
+  s_7c5d81b8cb730b::t_c4e44715d85239 30-35,56
+src/index.ts
+  s_effac2b4965c4d::t_a58136b228a385 2004
+src/model.ts
+  s_effac2b4965c4d::t_db4669fd0984c6 13
+  s_7c5d81b8cb730b::t_f46f416f0214a7 1,28-44,242,246,270,277,297-298
+src/repository-model.ts
+  s_effac2b4965c4d::t_715ddf3df6cb0b 34
+  s_7c5d81b8cb730b::t_fb841dd7817184 7,87-88,164,183,279-280,306,309-310,313,317-320,324,326,359,369-372,381-384,386,977,1058-1082
+  s_7c5d81b8cb730b::t_dc981481ee3c36 50-51,278,975
+  s_7c5d81b8cb730b::t_e08fd0b2c45511 385,395,454,490-491,506,940,947,954,967,978-979,1083-1084
+test/inference-timeout.test.ts
+  s_7e52b13aa5a5d8::t_db90cca8ce9299 2-3,8-10,40-42,95
+  s_effac2b4965c4d::t_674e96fbf307aa 4-7,11-39,43-59
+  s_7c5d81b8cb730b::t_6964a5bc35151a 1,61-95
+test/repository-recovery.test.ts
+  s_effac2b4965c4d::t_4825712d3ffa84 156,633-637
+  s_7c5d81b8cb730b::t_938d819c25fec5 12-49
+src/repository-diagnostics.ts
+  s_7c5d81b8cb730b::t_fb841dd7817184 1-30,32-35,37-50
+  s_7c5d81b8cb730b::t_dc981481ee3c36 31,36
+test/repository-diagnostics.test.ts
+  s_7c5d81b8cb730b::t_938d819c25fec5 1-24
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "45327ba09b99efcc0335fd81e6b21fed62e5c603",
+  "prompts": {},
+  "sessions": {
+    "s_7c5d81b8cb730b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a11df8-8340-7172-a8ba-4dd1e59e7fb2",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Marc Campbell <marc.e.campbell@gmail.com>"
+    },
+    "s_7e52b13aa5a5d8": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a11cdd-d5fe-7843-b109-382c5872ec21",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Marc Campbell <marc.e.campbell@gmail.com>"
+    },
+    "s_effac2b4965c4d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0eed2-c799-7e31-b5ad-bcffd20e23c8",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Marc Campbell <marc.e.campbell@gmail.com>"
+    }
+  }
+}
