@@ -1,0 +1,24 @@
+src/model.ts
+  s_7c5d81b8cb730b::t_c7c8b908e5f929 311,318,546-552
+  s_7c5d81b8cb730b::t_896576d2fc379d 553-558
+test/model.test.ts
+  s_7c5d81b8cb730b::t_c7c8b908e5f929 56-57,61,68-73
+  s_7c5d81b8cb730b::t_374baad9848c54 22-55,58-60,62-67
+  s_7c5d81b8cb730b::t_70d247470092fa 74-76
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b2de82d081e544a185aa3407b337f1f8d984aa4b",
+  "prompts": {},
+  "sessions": {
+    "s_7c5d81b8cb730b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a11df8-8340-7172-a8ba-4dd1e59e7fb2",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Marc Campbell <marc.e.campbell@gmail.com>"
+    }
+  }
+}
