@@ -1086,7 +1086,10 @@ provider/model identity, elapsed milliseconds, the shared deadline, remaining
 time at attempt start, and a typed failure code. Provider/model fields use the
 successful broker response or configured runner environment; unavailable identity
 is `unknown`. SDK timing does not change retries or deadlines and does not include
-endpoints, credentials, prompts, or source contents. The parent broker's provider
+endpoints, credentials, prompts, or source contents. If the deadline expires
+between attempts, a terminal `model.retry-delay` event identifies the
+`broker_retry_delay` stage and records the timeout without inventing another
+model attempt. The parent broker's provider
 timing remains necessary to locate failures inside inference.
 
 

@@ -94,6 +94,58 @@ it.each(["success", "retry", "timeout"])(
   },
 );
 
+it.each([false, true])(
+  "records a retry-delay timeout without another attempt (broken sink=%s)",
+  async (brokenSink) => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+    const logs: string[] = [];
+    const log = vi.spyOn(process.stderr, "write").mockImplementation((value) => {
+      logs.push(String(value));
+      if (brokenSink) throw new Error("sink failed");
+      return true;
+    });
+    const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("private error"));
+    try {
+      const model = new BrokerReviewModel("http://127.0.0.1:43123", "private-token", {
+        initialRetryDelayMs: 250,
+        random: () => 0.5,
+      });
+      const result = model.review({
+        prompt: "private-prompt",
+        input: { source: "private-source" },
+        schema: { type: "object" },
+        budget: { timeoutMs: 100 },
+      });
+      const rejected = expect(result).rejects.toMatchObject({
+        code: "model_timeout",
+        retryable: true,
+      });
+      await vi.advanceTimersByTimeAsync(100);
+      await rejected;
+      expect(fetch).toHaveBeenCalledOnce();
+      const events = logs.map((value) => JSON.parse(value));
+      expect(events).toHaveLength(3);
+      expect(events.filter((event) => event.event === "model.attempt")).toHaveLength(2);
+      expect(events.at(-1)).toMatchObject({
+        event: "model.retry-delay",
+        stage: "broker_retry_delay",
+        attempt: 1,
+        deadlineMs: 100,
+        remainingDeadlineMs: 100,
+        elapsedMs: 100,
+        outcome: "failed",
+        failureCode: "model_timeout",
+        requestId: events[0].requestId,
+      });
+      expect(logs.join("")).not.toMatch(/private|43123/);
+    } finally {
+      fetch.mockRestore();
+      log.mockRestore();
+      vi.useRealTimers();
+    }
+  },
+);
+
 it("redacts arbitrary broker failure codes in timing records", async () => {
   const log = vi.spyOn(process.stderr, "write").mockReturnValue(true);
   const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(

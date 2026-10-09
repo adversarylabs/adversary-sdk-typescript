@@ -275,7 +275,17 @@ export class BrokerReviewModel implements ReviewModel {
             this.#initialRetryDelayMs * 2 ** (attempt - 1),
           );
           const jittered = Math.round(exponential * (0.75 + 0.5 * this.#random()));
-          await waitForRetry(jittered, controller.signal, normalized.budget.timeoutMs);
+          const retryDelayFailed = diagnostics.startRetryDelay(attempt);
+          try {
+            await waitForRetry(jittered, controller.signal, normalized.budget.timeoutMs);
+          } catch (retryError) {
+            retryDelayFailed(
+              retryError instanceof ModelReviewError
+                ? (retryError.code ?? "model_review_failed")
+                : "model_review_failed",
+            );
+            throw retryError;
+          }
         }
       }
       throw new ModelReviewError("Model broker retry loop exhausted unexpectedly.", {

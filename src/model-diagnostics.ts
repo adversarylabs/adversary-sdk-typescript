@@ -28,6 +28,27 @@ export function modelAttemptDiagnostics(deadlineMs: number) {
   const provider = identity(process.env.ADVERSARY_MODEL_PROVIDER);
   const model = identity(process.env.ADVERSARY_MODEL);
   return {
+    startRetryDelay(attempt: number) {
+      const started = performance.now();
+      const remainingDeadlineMs = Math.max(0, Math.round(deadlineMs - (started - reviewStarted)));
+      return (failureCode: string) => {
+        writeRepositoryDiagnostic({
+          event: "model.retry-delay",
+          requestId,
+          jobId,
+          stage: "broker_retry_delay",
+          attempt,
+          deadlineMs,
+          remainingDeadlineMs,
+          elapsedMs: Math.round(performance.now() - started),
+          outcome: "failed",
+          provider,
+          model,
+          identitySource: "runner_environment",
+          failureCode: failureCodes.has(failureCode) ? failureCode : "model_review_failed",
+        });
+      };
+    },
     start(attempt: number) {
       const started = performance.now();
       const record = {
