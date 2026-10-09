@@ -340,7 +340,10 @@ export async function reviewWithRepositoryTools<T>(
       if (result.tool === "list_directory" && !("error" in result)) directoriesListed += 1;
       const bytes = encodedBytes(result);
       if (totalBytes + bytes > budget.maxTotalBytes) {
-        if (operation.tool === "read_change") discardedChanges.add(operation.path);
+        if (operation.tool === "read_change" && "path" in result) {
+          // Successful reads return the canonical repository-relative path.
+          discardedChanges.add(normalizeRepositoryPath(result.path) ?? result.path);
+        }
         exhausted = true;
         diagnostics.emit(
           {
@@ -1212,7 +1215,7 @@ function reportMissingReads(
       gap(
         results.some((r) => r.tool === "read_change" && r.path === path && "error" in r)
           ? "patch_read_failed"
-          : discardedChanges.has(path)
+          : discardedChanges.has(normalizeRepositoryPath(path) ?? path)
             ? "patch_discarded_byte_limit"
             : "patch_not_requested",
       );
