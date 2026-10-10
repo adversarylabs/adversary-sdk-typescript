@@ -52,7 +52,10 @@ export interface CandidateRecoveryResult<T> {
 
 /** Independent validation/recovery; an invalid candidate never discards valid peers. */
 export async function recoverReviewCandidates<T extends object>(
-  context: Pick<RuleContext, "model" | "review">,
+  context: {
+    model: Pick<RuleContext["model"], "review">;
+    review: Pick<RuleContext["review"], "incomplete">;
+  },
   options: CandidateRecoveryOptions<T>,
 ): Promise<CandidateRecoveryResult<T>> {
   if (options.kind !== undefined && !["candidate", "assessment"].includes(options.kind))
@@ -98,6 +101,7 @@ export async function recoverReviewCandidates<T extends object>(
     if (
       options.repair &&
       fields.size > 0 &&
+      issues.every((issue) => fields.has(issue.field)) &&
       result.repairCalls < maximumRepairCalls &&
       remainingTimeoutMs > 0
     ) {
@@ -109,7 +113,9 @@ export async function recoverReviewCandidates<T extends object>(
         requestedTimeout < 1 ||
         requestedTimeout > 600_000
       ) {
-        throw new TypeError("Invalid candidate repair request timeout.");
+        throw new ModelReviewError("Invalid candidate repair request timeout.", {
+          code: "invalid_model_budget",
+        });
       }
       repairAttempted = true;
       result.repairCalls += 1;

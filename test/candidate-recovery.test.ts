@@ -7,7 +7,6 @@ import {
   Confidence,
   ModelReviewError,
   type ModelReviewRequest,
-  type RuleContext,
   Severity,
   recoverReviewCandidates,
   validateReviewText,
@@ -44,7 +43,7 @@ function fixture(output: unknown = { summary: "The retry loses the original requ
     provider: "fixture",
     model: "fixture",
   }));
-  const context = { model: { review }, review: { incomplete } } as unknown as RuleContext;
+  const context = { model: { review }, review: { incomplete } };
   const repair = {
     fields: ["summary"] as const,
     request: () => ({
@@ -95,6 +94,44 @@ it("limits repair calls across a batch and validates later good candidates", asy
   expect(result.withheld).toHaveLength(2);
   expect(result.candidates).toEqual([{ ...bad, summary: good.summary }, good]);
 });
+it("reserves repair budget for candidates whose rejected fields are all repairable", async () => {
+  const f = fixture();
+  const unrecoverable = { ...bad, id: "unrecoverable" };
+  const result = await recoverReviewCandidates(f.context, {
+    candidates: [unrecoverable, bad, good],
+    validate: (candidate) => [
+      ...validate(candidate),
+      ...(candidate.id === "unrecoverable"
+        ? [{ field: "evidence", code: "invalid_value" as const }]
+        : []),
+    ],
+    repair: f.repair,
+    maximumRepairCalls: 1,
+  });
+  expect(result.candidates).toEqual([{ ...bad, summary: good.summary }, good]);
+  expect(result.withheld.map(({ index }) => index)).toEqual([0]);
+  expect(result.repairCalls).toBe(1);
+  expect(f.review).toHaveBeenCalledTimes(1);
+  expect(f.incomplete).toHaveBeenCalledWith("candidate_validation");
+});
+it.each([0, -1, 600_001, 1.5, Number.NaN])(
+  "reports invalid repair timeout %s with the standard budget error code",
+  async (timeoutMs) => {
+    const f = fixture();
+    await expect(
+      recoverReviewCandidates(f.context, {
+        candidates: [bad],
+        validate,
+        repair: {
+          ...f.repair,
+          request: () => ({ ...f.repair.request(), budget: { timeoutMs } }),
+        },
+      }),
+    ).rejects.toMatchObject({ name: "ModelReviewError", code: "invalid_model_budget" });
+    expect(f.review).not.toHaveBeenCalled();
+    expect(f.incomplete).not.toHaveBeenCalled();
+  },
+);
 it("a repair transport failure does not erase valid findings or leak its error body", async () => {
   const f = fixture();
   f.review.mockRejectedValue(new ModelReviewError("PRIVATE BODY", { code: "model_timeout" }));

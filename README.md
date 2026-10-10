@@ -1168,7 +1168,9 @@ const recovered = await recoverReviewCandidates(ctx, {
 
 Only rejected fields included in `repair.fields` are copied from the repair output;
 other returned fields are ignored. A repair cannot add candidates. Every repaired
-candidate is revalidated with the same domain rules. Model/broker failures during
+candidate is revalidated with the same domain rules. Candidates with any rejected
+field outside `repair.fields` are withheld without spending repair budget.
+Model/broker failures during
 repair withhold that candidate; validator and request-builder programming errors
 still propagate. Do not mark a domain-rejected/non-actionable observation as a
 malformed candidate: ordinary intentional filtering does not imply incomplete
