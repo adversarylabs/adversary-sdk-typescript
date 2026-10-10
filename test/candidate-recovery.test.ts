@@ -114,6 +114,37 @@ it("a repair transport failure does not erase valid findings or leak its error b
     log.mockRestore();
   }
 });
+it.each([
+  "invalid_model_request",
+  "model_request_too_large",
+  "invalid_model_schema",
+  "invalid_model_budget",
+  "invalid_broker_endpoint",
+  "invalid_broker_token",
+])("propagates repair request/configuration errors: %s", async (code) => {
+  const f = fixture();
+  const error = new ModelReviewError("Request configuration is invalid", { code });
+  f.review.mockRejectedValue(error);
+  await expect(
+    recoverReviewCandidates(f.context, {
+      candidates: [bad, good],
+      validate,
+      repair: f.repair,
+    }),
+  ).rejects.toBe(error);
+  expect(f.incomplete).not.toHaveBeenCalled();
+});
+it("withholds malformed repair responses while preserving valid peers", async () => {
+  const f = fixture(null);
+  const result = await recoverReviewCandidates(f.context, {
+    candidates: [bad, good],
+    validate,
+    repair: f.repair,
+  });
+  expect(result.candidates).toEqual([good]);
+  expect(result.withheld).toHaveLength(1);
+  expect(f.incomplete).toHaveBeenCalledWith("candidate_validation");
+});
 it("does not swallow validator or repair-builder programming errors", async () => {
   const f = fixture();
   await expect(

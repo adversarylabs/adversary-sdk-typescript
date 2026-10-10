@@ -133,6 +133,18 @@ export async function recoverReviewCandidates<T extends object>(
       } catch (error) {
         if (!(error instanceof ModelReviewError) && !(error instanceof ModelUnavailableError))
           throw error;
+        if (
+          error instanceof ModelReviewError &&
+          [
+            "invalid_model_request",
+            "model_request_too_large",
+            "invalid_model_schema",
+            "invalid_model_budget",
+            "invalid_broker_endpoint",
+            "invalid_broker_token",
+          ].includes(error.code ?? "")
+        )
+          throw error;
         diagnostic(options.reviewer, index, issues, 1, "repair_failed");
       }
       // Validation is outside the model-error catch: never swallow validator bugs.

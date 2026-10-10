@@ -1532,40 +1532,23 @@ function buildReviewResult(input: {
     positives,
   );
 
-  const assessment = input.collector.assessment ?? synthesizeAssessment(eligible, positives);
-  const synthesizedOpinion =
-    input.collector.incomplete || input.collector.opinion === undefined
-      ? synthesizeOpinion(eligible, input.change ?? null)
-      : undefined;
-  const opinion = input.collector.opinion ?? synthesizedOpinion;
-  const inferredRisk = highestRisk(eligible);
-  const riskOrder = ["none", "low", "medium", "high", "critical"];
-  const incompleteRisk =
-    riskOrder.indexOf(assessment.risk) > riskOrder.indexOf(inferredRisk)
-      ? assessment.risk
-      : inferredRisk;
+  const { assessment, opinion } = resolveReviewConclusion(
+    input.collector,
+    eligible,
+    positives,
+    input.change ?? null,
+  );
   return omitUndefined({
     adversary: input.adversary,
     target: omitUndefined({
       repository: input.repository,
       filesScanned: input.filesScanned,
     }),
-    assessment: input.collector.incomplete
-      ? { ...assessment, risk: incompleteRisk, summary: INCOMPLETE_REVIEW_SUMMARY }
-      : assessment,
+    assessment,
     positives,
     observations: reviewObservations,
     findings: eligible,
-    opinion: input.collector.incomplete
-      ? {
-          ...(input.collector.incompleteBlocking ||
-          opinion?.ship === false ||
-          synthesizedOpinion?.ship === false
-            ? { ship: false }
-            : {}),
-          summary: INCOMPLETE_REVIEW_SUMMARY,
-        }
-      : opinion,
+    opinion,
     suppressed: {
       observations: synthesis.suppressedObservations,
       findings: suppressedFindings.length,
@@ -1574,6 +1557,36 @@ function buildReviewResult(input: {
     suppressedFindings: input.includeSuppressed ? suppressedFindings : undefined,
     rawObservations: input.includeRawObservations ? input.collector.observations : undefined,
   }) as ReviewResult;
+}
+
+function resolveReviewConclusion(
+  collector: ReviewCollector,
+  findings: ReviewFinding[],
+  positives: ReviewNote[],
+  change: ChangeContext | null,
+): { assessment: ReviewAssessment; opinion: ReviewOpinion | undefined } {
+  const assessment = collector.assessment ?? synthesizeAssessment(findings, positives);
+  if (!collector.incomplete) {
+    return { assessment, opinion: collector.opinion ?? synthesizeOpinion(findings, change) };
+  }
+
+  const inferredRisk = highestRisk(findings);
+  const riskOrder = ["none", "low", "medium", "high", "critical"];
+  const risk =
+    riskOrder.indexOf(assessment.risk) > riskOrder.indexOf(inferredRisk)
+      ? assessment.risk
+      : inferredRisk;
+  const blocking =
+    collector.incompleteBlocking ||
+    collector.opinion?.ship === false ||
+    synthesizeOpinion(findings, change)?.ship === false;
+  return {
+    assessment: { ...assessment, risk, summary: INCOMPLETE_REVIEW_SUMMARY },
+    opinion: {
+      ...(blocking ? { ship: false } : {}),
+      summary: INCOMPLETE_REVIEW_SUMMARY,
+    },
+  };
 }
 
 interface ObservationSynthesisResult {
