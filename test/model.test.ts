@@ -14,6 +14,7 @@ import {
   type ModelReviewRequest,
   ModelUnavailableError,
   type ReviewModel,
+  enhanceReviewModel,
   unavailableModel,
 } from "../src/index.js";
 
@@ -59,7 +60,10 @@ it.each(["success", "retry", "timeout", "planning"])(
         budget: { timeoutMs: deadlineMs },
       });
       if (outcome === "timeout")
-        await expect(result).rejects.toMatchObject({ code: "model_timeout" });
+        await expect(result).rejects.toMatchObject({
+          code: "model_request_recovery_exhausted",
+          retryable: false,
+        });
       else await expect(result).resolves.toMatchObject({ output: {} });
       const records = log.mock.calls.map(([value]) => JSON.parse(String(value)));
       expect(records).toHaveLength(outcome === "retry" ? 4 : 2);
@@ -119,8 +123,9 @@ it.each([false, true])(
         budget: { timeoutMs: 100 },
       });
       const rejected = expect(result).rejects.toMatchObject({
-        code: "model_timeout",
-        retryable: true,
+        code: "model_request_recovery_exhausted",
+        retryable: false,
+        diagnostics: { attempts: 1, reason: "deadline" },
       });
       await vi.advanceTimersByTimeAsync(100);
       await rejected;
@@ -231,8 +236,9 @@ it.each([false, true])(
       });
       await expect(request).rejects.toBeInstanceOf(ModelReviewError);
       await expect(request).rejects.toMatchObject({
-        code: deadlineFired ? "model_timeout" : "broker_unavailable",
-        retryable: true,
+        code: "model_request_recovery_exhausted",
+        retryable: false,
+        diagnostics: { attempts: 1, reason: deadlineFired ? "deadline" : "attempt_limit" },
       });
       expect(fetch).toHaveBeenCalledOnce();
     } finally {
@@ -591,7 +597,7 @@ describe("model review capability", () => {
         schema: { type: "object" },
         budget: { timeoutMs: 25 },
       }),
-    ).rejects.toMatchObject<ModelReviewError>({ code: "model_timeout", retryable: true });
+    ).rejects.toMatchObject({ code: "model_request_recovery_exhausted", retryable: false });
   });
 
   it("retrieves repository evidence through bounded planning rounds", async () => {
@@ -1145,3 +1151,90 @@ describe("model review capability", () => {
     ).rejects.toMatchObject<ModelReviewError>({ code: "invalid_model_schema" });
   });
 });
+
+it.each([false, true])(
+  "reuses gathered evidence across broker retries (exhausted=%s)",
+  async (exhausted) => {
+    const root = await mkdtemp(join(tmpdir(), "sdk-retained-evidence-"));
+    await mkdir(join(root, "src"));
+    await writeFile(join(root, "src/index.ts"), "export const evidence = 'retained source';\n");
+    let planningCalls = 0;
+    const finalPayloads: unknown[] = [];
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      const payload = JSON.parse(String(init?.body));
+      let output: unknown;
+      if (payload.schema.properties?.ready !== undefined) {
+        planningCalls++;
+        output =
+          planningCalls === 1
+            ? {
+                ready: false,
+                operations: [
+                  { tool: "read_file", path: "src/index.ts", cursor: 0, startLine: 1, endLine: 1 },
+                ],
+              }
+            : { ready: true, operations: [] };
+      } else {
+        finalPayloads.push(payload);
+        if (finalPayloads.length < 3 || exhausted) {
+          return new Response(
+            JSON.stringify({
+              error: { code: "model_timeout", message: "private upstream body", retryable: true },
+            }),
+            { status: 503 },
+          );
+        }
+        output = { verdict: "approve" };
+      }
+      return new Response(
+        JSON.stringify({
+          protocolVersion: ADVERSARY_MODEL_PROTOCOL_VERSION,
+          provider: "fixture",
+          model: "fixture",
+          output,
+        }),
+      );
+    });
+    try {
+      const model = enhanceReviewModel(
+        new BrokerReviewModel("http://127.0.0.1:43123", "private-token", {
+          maximumAttempts: 3,
+          initialRetryDelayMs: 0,
+        }),
+        root,
+      );
+      const result = model.review({
+        prompt: "Review the source",
+        input: {},
+        schema: {
+          type: "object",
+          required: ["verdict"],
+          properties: { verdict: { const: "approve" } },
+          additionalProperties: false,
+        },
+        tools: { repository: { include: ["**/*.ts"], maxRounds: 3, maxToolCalls: 3 } },
+        budget: { timeoutMs: 5000 },
+      });
+      if (exhausted) {
+        await expect(result).rejects.toMatchObject({
+          code: "model_request_recovery_exhausted",
+          retryable: false,
+          diagnostics: { attempts: 3, reason: "attempt_limit" },
+        });
+        await expect(result).rejects.toThrow("model_request_recovery_exhausted:");
+        await expect(result).rejects.not.toThrow("private upstream body");
+      } else {
+        await expect(result).resolves.toMatchObject({ output: { verdict: "approve" } });
+      }
+      expect(planningCalls).toBe(2);
+      expect(finalPayloads).toHaveLength(3);
+      expect(finalPayloads[1]).toEqual(finalPayloads[0]);
+      expect(finalPayloads[2]).toEqual(finalPayloads[0]);
+      expect(JSON.stringify(finalPayloads[0])).toContain("retained source");
+      expect(JSON.stringify(finalPayloads[0])).toContain("repo:read:1");
+    } finally {
+      fetch.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
